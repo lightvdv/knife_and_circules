@@ -32,39 +32,37 @@ export const HULL_POINTS_LOCAL: THREE.Vector3[] = (() => {
   return pts;
 })();
 
-export function createKnifeMesh(): THREE.Group {
+/** Из чего спица: бамбуковая (лёгкие ножи) или металлическая (тяжёлые). */
+export type NeedleKind = 'bamboo' | 'metal';
+
+/**
+ * Вязальная спица того же размера, что и физическое тело ножа: острие — в TIP_LOCAL,
+ * шарик-навершие — на конце «рукоятки». Цвет навершия — цвет владельца.
+ */
+export function createNeedleMesh(kind: NeedleKind, knobColor: number, knobR = 0.038): THREE.Group {
   const group = new THREE.Group();
+  // Толще настоящей: сверху и издалека тонкую спицу не разглядеть. Физическое тело — прежнее.
+  const r = 0.011;
+  const tipLen = 0.035;
+  const bottom = -HANDLE.len;
+  const shaftLen = BLADE.len - tipLen - bottom;
+  const mat = kind === 'metal'
+    ? new THREE.MeshStandardMaterial({ color: 0xc9ced4, metalness: 0.85, roughness: 0.3 })
+    : new THREE.MeshStandardMaterial({ color: 0xd9b77a, roughness: 0.7 });
 
-  const shape = new THREE.Shape();
-  const hw = BLADE.halfW;
-  shape.moveTo(-hw, 0);
-  shape.lineTo(hw, 0);
-  shape.lineTo(hw, BLADE.len * 0.62);
-  shape.quadraticCurveTo(hw * 0.6, BLADE.len * 0.9, 0, BLADE.len);
-  shape.lineTo(-hw, BLADE.len * 0.8);
-  shape.closePath();
-  const bladeGeo = new THREE.ExtrudeGeometry(shape, { depth: BLADE.halfT * 2, bevelEnabled: false });
-  bladeGeo.translate(0, 0, -BLADE.halfT);
-  const blade = new THREE.Mesh(
-    bladeGeo,
-    new THREE.MeshStandardMaterial({ color: 0xd8dde3, metalness: 0.9, roughness: 0.25 }),
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(r, r, shaftLen, 12), mat);
+  shaft.position.y = bottom + shaftLen / 2;
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(r, tipLen, 12), mat);
+  tip.position.y = BLADE.len - tipLen / 2;
+  const knob = new THREE.Mesh(
+    new THREE.SphereGeometry(knobR, 16, 12),
+    new THREE.MeshStandardMaterial({ color: knobColor, roughness: 0.6 }),
   );
-  blade.castShadow = true;
-  group.add(blade);
-
-  const guard = new THREE.Mesh(
-    new THREE.BoxGeometry(HANDLE.halfW * 2.8, 0.008, HANDLE.halfT * 2.4),
-    new THREE.MeshStandardMaterial({ color: 0x555a60, metalness: 0.7, roughness: 0.4 }),
-  );
-  guard.castShadow = true;
-  group.add(guard);
-
-  const handleGeo = new THREE.BoxGeometry(HANDLE.halfW * 2, HANDLE.len, HANDLE.halfT * 2);
-  handleGeo.translate(0, -HANDLE.len / 2, 0);
-  const handle = new THREE.Mesh(handleGeo, new THREE.MeshStandardMaterial({ color: 0x6b3e1f, roughness: 0.8 }));
-  handle.castShadow = true;
-  group.add(handle);
-
+  knob.position.y = bottom;
+  for (const m of [shaft, tip, knob]) {
+    m.castShadow = true;
+    group.add(m);
+  }
   return group;
 }
 

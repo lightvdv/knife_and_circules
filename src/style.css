@@ -1,6 +1,6 @@
 :root {
-  --p0: #3b82f6;
-  --p1: #e5484d;
+  --p0: #e39b3c;
+  --p1: #6e8fb3;
   --panel: rgba(20, 22, 26, 0.72);
   --text: #f3f4f6;
 }
@@ -11,7 +11,7 @@ html, body {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: #b9cfdc;
+  background: #d8c9ad;
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   color: var(--text);
   user-select: none;
@@ -70,4 +70,30 @@ html, body {
 @media (max-width: 600px) {
   #hud { padding: 10px 16px; }
   #hint { display: none; }
+}
+
+/* Телефон горизонтально: низкий экран. Поле — главное; кнопки столбиком слева внизу,
+   правая сторона свободна под свайп большим пальцем. */
+@media (max-height: 500px) {
+  #hud { padding: 8px 12px; }
+  #hint { display: none; }
+  #turn { font-size: 14px; padding: 5px 10px; }
+  #scores { font-size: 13px; padding: 5px 10px; gap: 10px; }
+  #message { top: 8px; font-size: 14px; padding: 5px 12px; max-width: 46vw; }
+  #bottom { align-items: flex-start; gap: 6px; }
+  #throwinfo { font-size: 11px; padding: 3px 8px; }
+  #controls { flex-direction: column; align-items: stretch; gap: 6px; }
+  #controls select, #controls button { font-size: 13px; padding: 6px 10px; }
+}
+
+/* Подсказка повернуть телефон: игра рассчитана на горизонтальный экран. */
+#rotate {
+  position: fixed; inset: 0; display: none; place-items: center; text-align: center;
+  background: rgba(30, 22, 16, 0.92); color: var(--text); z-index: 10; padding: 24px;
+}
+#rotate p { font-size: 20px; margin: 0 0 18px; }
+#rotate .phone { font-size: 56px; display: inline-block; transform: rotate(90deg); margin-bottom: 16px; }
+#rotate button { border: 0; border-radius: 10px; padding: 8px 14px; font: inherit; background: #3a2f27; color: var(--text); }
+@media (orientation: portrait) and (pointer: coarse) {
+  body:not(.allow-portrait) #rotate { display: grid; }
 }

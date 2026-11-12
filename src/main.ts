@@ -7,9 +7,10 @@ import {
   type Region, type Vec2,
 } from './geometry';
 import {
-  createKnifeMesh, createKnifeBody, planRelease, landingTime,
-  TIP_LOCAL, GRIP_LOCAL, HULL_POINTS_LOCAL, HELD_TIP_ANGLE, type KnifeBody, type Release,
+  createNeedleMesh, createKnifeBody, planRelease, landingTime,
+  TIP_LOCAL, GRIP_LOCAL, HULL_POINTS_LOCAL, HELD_TIP_ANGLE, type KnifeBody, type Release, type NeedleKind,
 } from './knife';
+import { createRug, createCat, createPaw, createYarnBall, threadMesh, floorTexture, ROOM_COLOR } from './look';
 import {
   crackFrom, markHit, canPlaceMark, splitPieces, capturedPieces, guardingMark,
   MARK_R, MARK_HP, MARKS_PER_PLAYER, MIN_PIECE, GUARD_DAMAGE, type Crack, type Mark,
@@ -24,12 +25,33 @@ const STICK_MIN_SPEED = 1.5; // м/с
 const STICK_DEPTH = 0.035; // насколько нож уходит в землю
 const EYE_HEIGHT = 1.45;
 const PHYS_DT = 1 / 120;
-const COLORS = [0x3b82f6, 0xe5484d];
-const NAMES = ['Синий', 'Красный'];
+/** Цвет кота-игрока: им тонируется его половина половика (рыжий — тёплая охра, серый — холодный серо-синий). */
+const COLORS = [0xe39b3c, 0x6e8fb3];
+const NAMES = ['Рыжий', 'Серый'];
+/** Нитка по границе территорий и нитка разреза. */
+const BORDER_COLOR = 0xd8262c;
+const CUT_COLOR = 0xf3ead8;
+/**
+ * Камера «из-за плеча»: выше и позади точки броска. Бросок по-прежнему летит из руки на высоте EYE_HEIGHT,
+ * камера только показывает. Наклон и расстояние подобраны так, чтобы половик целиком влезал по ширине
+ * и чужая половина читалась не хуже своей.
+ */
+const CAM = {
+  height: 1.55, // высота камеры, м (чуть выше глаз кота, вставшего на задние лапы)
+  back: 0.7, // насколько камера позади кота, м
+  ahead: 0.6, // куда смотрим: доля пути от себя до соперника
+  onRug: 0.95, // камера не дальше этой доли радиуса от центра — «стоим на половике»
+  fovPortrait: 72,
+  portraitLookAhead: 0.55, // на телефоне взгляд дальше точки, от которой строится камера, м
+  fovLandscape: 52,
+  fovWide: 60,
+};
 const CIRCLE_AREA = Math.PI * CIRCLE_R * CIRCLE_R;
 const BOT = 1; // бот играет за красных
 const KNIVES_PER_PLAYER = 5; // сколько ножей у каждого в начале партии
 const WALK_SPEED = 0.8; // м/с, шаг по своей земле
+const RUN_SPEED = 1.8; // м/с, перебежка по тапу
+const TAP_MAX = 0.025; // жест короче этого (в высотах экрана) — тап, а не бросок
 const LOOK_SENS = 0.004; // рад на пиксель при повороте правой кнопкой
 
 /**
@@ -104,15 +126,16 @@ async function main() {
   const canvas = renderer.domElement;
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xb9cfdc);
-  scene.fog = new THREE.Fog(0xb9cfdc, 10, 28);
+  scene.background = new THREE.Color(ROOM_COLOR);
+  scene.fog = new THREE.Fog(ROOM_COLOR, 7, 18);
 
   const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.02, 100);
-  scene.add(camera); // нужно, чтобы нож в руке (дочерний объект камеры) рисовался
+  scene.add(camera); // нужно, чтобы лапа со спицей (дочерний объект камеры) рисовалась
 
-  scene.add(new THREE.HemisphereLight(0xe6f2ff, 0x6b5a45, 1.1));
-  const sun = new THREE.DirectionalLight(0xffffff, 2.2);
-  sun.position.set(3, 6, 2);
+  // Ровный дневной свет из окна, без «золотого часа».
+  scene.add(new THREE.HemisphereLight(0xfff4e2, 0x6a4a35, 1.25));
+  const sun = new THREE.DirectionalLight(0xfff1dc, 1.7);
+  sun.position.set(-3, 6, 2.5);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   Object.assign(sun.shadow.camera, { left: -4, right: 4, top: 4, bottom: -4, near: 0.5, far: 20 });
@@ -121,19 +144,12 @@ async function main() {
 
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(40, 40),
-    new THREE.MeshStandardMaterial({ map: dirtTexture(), roughness: 1 }),
+    new THREE.MeshStandardMaterial({ map: floorTexture(), roughness: 0.95, color: 0xcfc4bc }),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
   scene.add(ground);
-
-  const groove = new THREE.Mesh(
-    new THREE.RingGeometry(CIRCLE_R - 0.012, CIRCLE_R + 0.012, 160),
-    new THREE.MeshBasicMaterial({ color: 0x3b2a1a }),
-  );
-  groove.rotation.x = -Math.PI / 2;
-  groove.position.y = 0.007;
-  scene.add(groove);
+  scene.add(createRug(CIRCLE_R));
 
   // ---------- Физика ----------
   const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
@@ -166,6 +182,12 @@ async function main() {
   let gesture: Sample[] = [];
   let trail: Sample[] = [];
   let clock = 0; // игровое время, с
+  /** Сколько внутренних рёбер своей земли оказались не границей (швы, «усики») — для отладки. */
+  let seams = 0;
+  /** Обзор сверху во время своего хода: видно всю свою землю, тап — перебежать. */
+  let overviewMode = false;
+  /** Куда перебегает кот после тапа. */
+  let moveTo: Vec2 | null = null;
 
   const isBot = (p: number) => opponent !== 'human' && p === BOT;
   const knifeOf = (p: number) => KNIVES[isBot(p) ? BOT_KNIFE : knives[p]];
@@ -190,22 +212,35 @@ async function main() {
   ghost.visible = false;
   scene.add(ghost);
 
-  const figures = COLORS.map((c) => createFigure(c));
+  const figures = COLORS.map((c, i) => createFigure(c, i));
   figures.forEach((f) => scene.add(f.group));
 
-  // Нож в руке: пальцы держат лезвие у острия, нож висит остриём вниз.
+  // Спица в лапе: лапа держит её у острия, спица висит остриём вниз.
   const hand = new THREE.Group();
-  const heldKnife = createKnifeMesh();
-  heldKnife.position.copy(GRIP_LOCAL).multiplyScalar(-1);
-  hand.add(heldKnife);
-  const skin = new THREE.MeshStandardMaterial({ color: 0xf1c7a0, roughness: 0.8 });
-  const thumb = new THREE.Mesh(new THREE.CapsuleGeometry(0.009, 0.025, 4, 8), skin);
-  thumb.position.set(0, 0, 0.008);
-  thumb.rotation.z = Math.PI / 2;
-  const finger = thumb.clone();
-  finger.position.z = -0.008;
-  hand.add(thumb, finger);
+  let heldKnife = new THREE.Group();
+  let heldKey = '';
+  const paws = [createPaw(0), createPaw(1)];
+  paws.forEach((p) => hand.add(p));
   camera.add(hand);
+
+  /** Какая спица у игрока: лёгкие ножи — бамбуковые, тяжёлые — металлические. */
+  const needleKind = (p: number): NeedleKind => (knifeOf(p).assist >= 0.7 ? 'bamboo' : 'metal');
+  const needleMesh = (p: number) => createNeedleMesh(needleKind(p), COLORS[p]);
+
+  /** Обновить спицу и окрас лапы под того, чьими глазами смотрим. */
+  function updateHeld() {
+    const p = viewer();
+    const key = `${p}:${needleKind(p)}`;
+    paws.forEach((paw, i) => (paw.visible = i === p));
+    if (key === heldKey) return;
+    heldKey = key;
+    hand.remove(heldKnife);
+    disposeObject(heldKnife);
+    heldKnife = createNeedleMesh(needleKind(p), COLORS[p], 0.014); // вблизи шарик меньше
+    heldKnife.position.copy(GRIP_LOCAL).multiplyScalar(-1);
+    heldKnife.scale.set(0.6, 1, 0.6); // вблизи спица не должна выглядеть палкой
+    hand.add(heldKnife);
+  }
 
   // ---------- HUD ----------
   const msgEl = $('message');
@@ -240,7 +275,10 @@ async function main() {
       (phase === 'place' ? `Метки: ${who}` : `Ход: ${who}`);
     for (let i = 0; i < 2; i++)
       $(`score${i}`).textContent = `${Math.round((regionArea(regions[i]) / CIRCLE_AREA) * 100)}% · ножей ${inHand[i]}`;
-    const canCollect = phase === 'aim' && !isBot(cur) ? pickable(cur).length : 0;
+    const myTurn = phase === 'aim' && !isBot(cur);
+    $('overview').hidden = !myTurn;
+    $('overview').textContent = overviewMode ? 'Назад' : 'Обзор';
+    const canCollect = myTurn ? pickable(cur).length : 0;
     $('collect').hidden = !canCollect;
     $('collect').textContent = `Собрать ножи (${canCollect})`;
     knifeSelect.value = knives[selectedPlayer()];
@@ -249,9 +287,11 @@ async function main() {
       ? `Нажми на свою землю, чтобы поставить метку: первая — прочность 1, вторая — 2, третья — 3. ` +
         `Кусок под целой меткой не отрезать: вместо этого метка теряет прочность.`
       : `<b>Рывок вверх</b>: длина — дальность, резкость — закрутка (нужен один оборот), вбок — направление · ` +
-        `<b>Правая кнопка</b> — осмотреться, <b>WASD</b> — шаг по своей земле · ` +
+        `<b>Тап по своей земле</b> — перебежать, <b>«Обзор»</b> — вся земля сверху, <b>вбок</b> — осмотреться · ` +
+        `<b>Правая кнопка</b> — осмотреться, <b>WASD</b> — шаг · ` +
         `Нож, не отрезавший землю, остаётся в поле; ножи на земле соперника не забрать, пока не отрежешь её · <b>${k.label}</b>: помощь ${Math.round(k.assist * 100)}%, ` +
         `урон по метке ${k.damage}, шатание ±${k.wobble}°`;
+    updateHeld();
   }
 
   const canStand = (p: Vec2, region: Region) => pointInRegion(p, region) && distToBoundary(p, region) >= FOOT_R;
@@ -280,17 +320,94 @@ async function main() {
     }
   }
 
+  /** Тап по экрану: если попали в свою землю, где можно сидеть, — кот перебегает туда. */
+  function tryMoveTo(clientX: number, clientY: number): boolean {
+    if (phase !== 'aim' || isBot(cur)) return false;
+    const g = groundPoint(clientX, clientY);
+    if (!g) return false;
+    const p: Vec2 = [g.x, g.z];
+    if (!pointInRegion(p, regions[cur])) return false;
+    if (!canStand(p, regions[cur])) {
+      setMessage('Здесь не сесть — слишком близко к краю');
+      return true;
+    }
+    moveTo = p;
+    return true;
+  }
+
+  /** Перебежка по прямой; упёрлись в край своей земли — остановились. */
+  function stepMove(dt: number) {
+    if (!moveTo) return;
+    if (phase !== 'aim' && phase !== 'gesture') {
+      moveTo = null;
+      return;
+    }
+    const [x, z] = stands[cur];
+    const dx = moveTo[0] - x;
+    const dz = moveTo[1] - z;
+    const d = Math.hypot(dx, dz);
+    const step = Math.min(d, RUN_SPEED * dt);
+    const next: Vec2 = d < 1e-4 ? moveTo : [x + (dx / d) * step, z + (dz / d) * step];
+    if (!canStand(next, regions[cur])) {
+      moveTo = null;
+      return;
+    }
+    stands[cur] = next;
+    figures[cur].group.position.set(next[0], 0, next[1]);
+    figures[cur].group.lookAt(stands[1 - cur][0], 0, stands[1 - cur][1]);
+    lastManual = clock;
+    if (step >= d) moveTo = null;
+  }
+
+  function setOverview(on: boolean) {
+    overviewMode = on && phase === 'aim' && !isBot(cur);
+    updateHud();
+  }
+
   function rebuildTerritories() {
     for (let i = 0; i < 2; i++) {
       clearGroup(territoryGroups[i]);
-      territoryGroups[i].add(regionMesh(regions[i], COLORS[i], 0.5, 0.003));
+      territoryGroups[i].add(regionMesh(regions[i], COLORS[i], 0.32, 0.007));
       // Игрок остаётся, где стоял, если там ещё есть место; иначе — на самое просторное место.
       if (!canStand(stands[i], regions[i])) stands[i] = largestInscribed(regions[i]).center;
       figures[i].group.position.set(stands[i][0], 0, stands[i][1]);
     }
     figures[0].group.lookAt(stands[1][0], 0, stands[1][1]);
     figures[1].group.lookAt(stands[0][0], 0, stands[0][1]);
+    territoryGroups[0].add(threadMesh(borderSegments().map(([a, b]) => [
+      new THREE.Vector3(a[0], 0.014, a[1]), new THREE.Vector3(b[0], 0.014, b[1]),
+    ]), BORDER_COLOR, 0.016));
     updateHud();
+  }
+
+  /**
+   * Где лежит красная нитка: только там, где по разные стороны — земли разных котов.
+   * Просто брать все стороны многоугольников нельзя: после объединения кусков в них бывают
+   * швы между своими же кусками и «усики» (ребро туда и обратно) — нитка ложилась поперёк своей земли.
+   */
+  function borderSegments(): [Vec2, Vec2][] {
+    const out: [Vec2, Vec2][] = [];
+    const EPS = 0.006;
+    seams = 0;
+    for (const poly of regions[0])
+      for (const ring of poly)
+        for (let k = 0; k + 1 < ring.length; k++) {
+          const a = ring[k];
+          const b = ring[k + 1];
+          const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+          if (len < 1e-4) continue;
+          const m: Vec2 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+          if (Math.hypot(m[0], m[1]) > CIRCLE_R - 0.02) continue; // край половика
+          // Пробуем по точке с каждой стороны ребра.
+          const n: Vec2 = [-(b[1] - a[1]) / len * EPS, (b[0] - a[0]) / len * EPS];
+          const l: Vec2 = [m[0] + n[0], m[1] + n[1]];
+          const r: Vec2 = [m[0] - n[0], m[1] - n[1]];
+          const mixed = (pointInRegion(l, regions[0]) && pointInRegion(r, regions[1])) ||
+            (pointInRegion(l, regions[1]) && pointInRegion(r, regions[0]));
+          if (mixed) out.push([a, b]);
+          else seams++;
+        }
+    return out;
   }
 
   /** Снять прочность с метки и подсветить её. */
@@ -329,46 +446,33 @@ async function main() {
       if (m.hp <= 0) continue;
       const g = new THREE.Group();
       g.position.set(m.c[0], 0, m.c[1]);
+      // Зона защиты — светлое пятно с кольцом цвета владельца.
       const disc = new THREE.Mesh(
         new THREE.CircleGeometry(MARK_R, 48),
-        new THREE.MeshBasicMaterial({ color: COLORS[m.owner], transparent: true, opacity: 0.35, depthWrite: false }),
+        new THREE.MeshBasicMaterial({ color: 0xfff6e0, transparent: true, opacity: 0.18, depthWrite: false }),
       );
       disc.rotation.x = -Math.PI / 2;
-      disc.position.y = 0.008;
+      disc.position.y = 0.009;
       const ring = new THREE.Mesh(
-        new THREE.RingGeometry(MARK_R - 0.02, MARK_R, 48),
-        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 }),
+        new THREE.RingGeometry(MARK_R - 0.014, MARK_R, 48),
+        new THREE.MeshBasicMaterial({ color: COLORS[m.owner], transparent: true, opacity: 0.85, depthWrite: false }),
       );
       ring.rotation.x = -Math.PI / 2;
-      ring.position.y = 0.009;
-      g.add(disc, ring);
-      // Колышки — сколько прочности осталось.
-      for (let i = 0; i < m.hp; i++) {
-        const a = (i / MARK_HP) * Math.PI * 2 + Math.PI / 2;
-        const peg = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.014, 0.014, 0.05, 10),
-          new THREE.MeshStandardMaterial({ color: 0xf5f0e6, roughness: 0.6 }),
-        );
-        peg.position.set(Math.cos(a) * MARK_R * 0.5, 0.025, Math.sin(a) * MARK_R * 0.5);
-        peg.castShadow = true;
-        g.add(peg);
-      }
+      ring.position.y = 0.01;
+      // Клубок: чем прочнее метка, тем он больше; при уроне — уменьшается.
+      g.add(disc, ring, createYarnBall(m.owner, Math.min(MARK_HP, m.hp)));
       marksGroup.add(g);
     }
   }
 
   function rebuildCracks() {
     clearGroup(cracksGroup);
-    for (const k of cracks) {
-      const dx = k.b[0] - k.a[0];
-      const dz = k.b[1] - k.a[1];
-      const len = Math.hypot(dx, dz);
-      if (len < 1e-3) continue;
-      const m = new THREE.Mesh(new THREE.BoxGeometry(len, 0.002, 0.014), new THREE.MeshBasicMaterial({ color: 0x1d130b }));
-      m.position.set((k.a[0] + k.b[0]) / 2, 0.01, (k.a[1] + k.b[1]) / 2);
-      m.rotation.y = -Math.atan2(dz, dx);
-      cracksGroup.add(m);
-    }
+    // Воткнутая спица тянет светлую нитку разреза.
+    const segs = cracks.map((k): [THREE.Vector3, THREE.Vector3] => [
+      new THREE.Vector3(k.a[0], 0.018, k.a[1]),
+      new THREE.Vector3(k.b[0], 0.018, k.b[1]),
+    ]);
+    cracksGroup.add(threadMesh(segs, CUT_COLOR, 0.008));
   }
 
   // ---------- Камера ----------
@@ -376,10 +480,11 @@ async function main() {
   const camLook = new THREE.Vector3();
   /** Поворот взгляда игрока относительно направления на соперника (правая кнопка мыши). */
   const look = [{ yaw: 0, pitch: 0 }, { yaw: 0, pitch: 0 }];
-  let lookDrag: { x: number; y: number } | null = null;
+  /** Поворот взгляда: правой кнопкой (вбок и вверх-вниз) или пальцем вбок (только вбок). */
+  let lookDrag: { x: number; y: number; yawOnly?: boolean } | null = null;
   const keys = new Set<string>();
   let lastManual = -1; // когда игрок последний раз крутил камеру или шагал (для отзывчивости камеры)
-  const isFirstPerson = () => phase !== 'place' && phase !== 'over';
+  const isFirstPerson = () => phase !== 'place' && phase !== 'over' && !overviewMode;
 
   /** Глаза игрока: стоит на своём месте и смотрит на землю соперника. */
   function firstPersonView(p: number) {
@@ -407,8 +512,32 @@ async function main() {
   /** Чьими глазами смотрим: в игре с ботом — всегда глазами человека. */
   const viewer = () => (opponent === 'human' ? cur : 1 - BOT);
 
+  /**
+   * Камера «из-за плеча» игрока p: за котом и чуть выше его глаз, на постоянной высоте —
+   * кот не может приподняться. Своего кота не видно — только лапа со спицей.
+   * Камера всегда над половиком: если сзади мало места, она подходит ближе к коту (но не поднимается).
+   * Поворот взгляда (правая кнопка, палец вбок): вбок — кот поворачивается, камера остаётся за ним;
+   * вверх-вниз — только наклон головы, камера на месте.
+   */
+  function shoulderView(p: number) {
+    const fp = firstPersonView(p);
+    const [x, z] = stands[p];
+    const [ox, oz] = stands[1 - p];
+    const fwd = new THREE.Vector3(Math.cos(fp.yaw), 0, Math.sin(fp.yaw));
+    const back = Math.min(CAM.back, rayToCircle([x, z], [-fwd.x, -fwd.z], CIRCLE_R * CAM.onRug));
+    const pos = new THREE.Vector3(x, CAM.height, z).addScaledVector(fwd, -back);
+    // Куда смотрим без наклона головы: на точку между собой и соперником
+    // (в высоком кадре — дальше: снизу и так много своей земли).
+    let ahead = Math.max(0.6, Math.hypot(ox - x, oz - z) * CAM.ahead);
+    if (camera.aspect < 1) ahead += CAM.portraitLookAhead;
+    const basePitch = Math.atan2(CAM.height, back + ahead);
+    const pitch = THREE.MathUtils.clamp(basePitch + look[p].pitch, -0.3, 1.5);
+    const dir = fwd.clone().multiplyScalar(Math.cos(pitch)).addScaledVector(UP, -Math.sin(pitch));
+    return { pos, look: pos.clone().add(dir) };
+  }
+
   function updateCamera(dt: number, snap = false) {
-    const v = isFirstPerson() ? firstPersonView(viewer()) : overview();
+    const v = isFirstPerson() ? shoulderView(viewer()) : overview();
     const rate = clock - lastManual < 0.25 ? 30 : 5; // свои повороты и шаги — без задержки
     const a = snap ? 1 : 1 - Math.exp(-dt * rate);
     camPos.lerp(v.pos, a);
@@ -416,13 +545,18 @@ async function main() {
     camera.position.copy(camPos);
     camera.lookAt(camLook);
     const settled = camPos.distanceTo(v.pos) < 0.05;
-    figures.forEach((f, i) => (f.group.visible = !(isFirstPerson() && i === viewer() && camPos.distanceTo(v.pos) < 1)));
+    // Своего кота в кадре нет — только его след на половике.
+    figures.forEach((f, i) => (f.body.visible = !(isFirstPerson() && i === viewer())));
 
-    // Нож в пальцах; по ходу рывка кисть отводится назад и вперёд.
-    hand.visible = settled && !isBot(cur) && (phase === 'aim' || phase === 'gesture');
+    // Лапа со спицей в правом нижнем углу; по ходу рывка лапа отводится назад и вперёд.
+    hand.visible = settled && isFirstPerson() && !isBot(cur) && (phase === 'aim' || phase === 'gesture');
     const u = phase === 'gesture' ? Math.min(1, gestureLength() / SWIPE.fullLength) : 0;
-    hand.position.set(0.2, -0.22 + u * 0.06, -0.5 - u * 0.12);
-    hand.rotation.set(-(HELD_TIP_ANGLE - u * 0.7), 0, 0);
+    const depth = 0.5;
+    const hh = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * depth;
+    const hw = hh * camera.aspect;
+    hand.position.set(hw * 0.62, -hh * 0.62 + u * 0.05, -depth - u * 0.1);
+    hand.scale.setScalar(0.8);
+    hand.rotation.set(-(HELD_TIP_ANGLE - u * 0.7), 0, -0.15);
   }
 
   /** Положение пальцев с ножом в мире (справа-снизу от глаз) и направление взгляда игрока p. */
@@ -467,6 +601,7 @@ async function main() {
   /** Вместо броска собрать свои ножи. */
   function collect() {
     if (phase !== 'aim') return;
+    overviewMode = false;
     const list = pickable(cur);
     if (!list.length) return;
     takeBack(list);
@@ -478,7 +613,7 @@ async function main() {
     removeKnife();
     if (inHand[cur] <= 0) return;
     inHand[cur]--;
-    const mesh = createKnifeMesh();
+    const mesh = needleMesh(cur);
     scene.add(mesh);
     knife = {
       owner: cur,
@@ -539,10 +674,20 @@ async function main() {
     const samples = gesture;
     gesture = [];
     phase = 'aim';
+    const len = gestureLength(samples);
+    // Короткое касание без рывка — тап: перебежать по своей земле.
+    if (len < TAP_MAX) {
+      const last = samples[samples.length - 1];
+      if (!tryMoveTo(last.x, last.y)) setMessage('Рывок вверх — бросок, тап по своей земле — перебежать');
+      return;
+    }
     if (samples.length < 2) return;
+    if (inHand[cur] <= 0) {
+      setMessage('Спиц в лапе нет — собери свои');
+      return;
+    }
     const { vx, vy } = releaseVelocity(samples, SWIPE.releaseWindow); // вверх по экрану — вперёд
     const s = Math.hypot(vx, vy);
-    const len = gestureLength(samples);
     if (vy <= 0 || s < SWIPE.minSwipe || len < SWIPE.minLength) {
       setMessage('Сделай резкий рывок вперёд — вверх по экрану');
       return;
@@ -697,6 +842,8 @@ async function main() {
     rebuildCracks();
     cur = 1 - cur;
     phase = 'aim';
+    overviewMode = false;
+    moveTo = null;
     updateHud();
     if (inHand[cur] === 0 && !pickable(cur).length) {
       gameOver(1 - cur, `У игрока ${NAMES[cur]} кончились ножи`);
@@ -809,6 +956,8 @@ async function main() {
     marks = [];
     cracks = [];
     gesture = [];
+    overviewMode = false;
+    moveTo = null;
     infoEl.textContent = '';
     $('overlay').hidden = true;
     rebuildTerritories();
@@ -855,23 +1004,53 @@ async function main() {
       if (p && !placeMark([p.x, p.z])) setMessage('Сюда нельзя: метка должна быть на твоей земле и не задевать другие метки');
       return;
     }
-    if (phase !== 'aim' || isBot(cur) || inHand[cur] <= 0) return;
+    if (phase !== 'aim' || isBot(cur)) return;
+    if (overviewMode) {
+      // В обзоре тап только выбирает, куда перебежать.
+      if (tryMoveTo(ev.clientX, ev.clientY)) setOverview(false);
+      else setMessage('Тапни по своей земле — кот перебежит туда');
+      return;
+    }
     phase = 'gesture';
     gesture = [];
     trail = [];
+    gestureKind = 'undecided';
     addSample(ev);
     canvas.setPointerCapture(ev.pointerId);
   });
+
+  /**
+   * Что за жест: решаем по первым пикселям движения. В основном вбок — осмотреться (поворот взгляда),
+   * иначе — бросок (рывок вверх; его отклонение вбок задаёт направление броска).
+   */
+  let gestureKind: 'undecided' | 'throw' = 'undecided';
+  const GESTURE_DECIDE_PX = 12;
+  function classifyGesture(ev: PointerEvent): boolean {
+    if (gestureKind !== 'undecided' || !gesture.length) return false;
+    const dx = ev.clientX - gesture[0].x;
+    const dy = ev.clientY - gesture[0].y;
+    if (Math.hypot(dx, dy) < GESTURE_DECIDE_PX) return false;
+    if (Math.abs(dx) > 1.3 * Math.abs(dy)) {
+      phase = 'aim';
+      gesture = [];
+      trail = [];
+      lookDrag = { x: ev.clientX, y: ev.clientY, yawOnly: true };
+      return true;
+    }
+    gestureKind = 'throw';
+    return false;
+  }
   canvas.addEventListener('pointermove', (ev) => {
     if (lookDrag) {
       const l = look[viewer()];
       l.yaw += (ev.clientX - lookDrag.x) * LOOK_SENS;
-      l.pitch = THREE.MathUtils.clamp(l.pitch + (ev.clientY - lookDrag.y) * LOOK_SENS, -1.2, 0.9);
-      lookDrag = { x: ev.clientX, y: ev.clientY };
+      if (!lookDrag.yawOnly) l.pitch = THREE.MathUtils.clamp(l.pitch + (ev.clientY - lookDrag.y) * LOOK_SENS, -1.2, 0.9);
+      lookDrag = { ...lookDrag, x: ev.clientX, y: ev.clientY };
       lastManual = clock;
       return;
     }
     if (!ev.isPrimary) return;
+    if (phase === 'gesture' && classifyGesture(ev)) return;
     if (phase === 'gesture') {
       const coalesced = ev.getCoalescedEvents?.() ?? [];
       for (const e of coalesced.length ? coalesced : [ev]) addSample(e);
@@ -879,12 +1058,16 @@ async function main() {
     hoverGhost(ev.clientX, ev.clientY);
   });
   canvas.addEventListener('pointerup', (ev) => {
-    if (ev.button === 2) lookDrag = null;
+    if (ev.button === 2 || (lookDrag?.yawOnly && ev.isPrimary)) {
+      lookDrag = null;
+      return;
+    }
     if (!ev.isPrimary || ev.button !== 0 || phase !== 'gesture') return;
     addSample(ev);
     finishSwipe();
   });
   canvas.addEventListener('pointercancel', () => {
+    if (lookDrag?.yawOnly) lookDrag = null;
     gesture = [];
     if (phase === 'gesture') phase = 'aim';
   });
@@ -897,10 +1080,19 @@ async function main() {
   addEventListener('blur', () => keys.clear());
   $('restart').addEventListener('click', reset);
   $('collect').addEventListener('click', collect);
+  $('overview').addEventListener('click', (e) => {
+    setOverview(!overviewMode);
+    (e.currentTarget as HTMLElement).blur();
+  });
   $('overlay-restart').addEventListener('click', reset);
+  // Для сравнения можно играть и вертикально — подсказку «поверни телефон» убираем до перезагрузки.
+  $('rotate-skip').addEventListener('click', () => document.body.classList.add('allow-portrait'));
 
   function resize() {
     camera.aspect = innerWidth / innerHeight;
+    // В узком вертикальном кадре чуть шире угол, чтобы половик не уезжал вдаль.
+    // На очень широком (телефон горизонтально) — тоже чуть шире, иначе кот-соперник упирается в верх кадра.
+    camera.fov = camera.aspect < 1 ? CAM.fovPortrait : camera.aspect > 1.9 ? CAM.fovWide : CAM.fovLandscape;
     camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
     trailCanvas.width = innerWidth * devicePixelRatio;
@@ -967,6 +1159,7 @@ async function main() {
     }
     clock += dt;
     walk(dt);
+    stepMove(dt);
     updateFlashes();
     updateCamera(dt);
   }
@@ -985,6 +1178,11 @@ async function main() {
         return 'thrown';
       },
       collect,
+      /** Где на экране (в CSS-пикселях) точка поля x, z на высоте y. */
+      project(x: number, z: number, y = 0) {
+        const v = new THREE.Vector3(x, y, z).project(camera);
+        return [Math.round((v.x + 1) / 2 * innerWidth), Math.round((1 - v.y) / 2 * innerHeight)];
+      },
       setKnife(k: KnifeId) {
         knifeSelect.value = k;
         knifeSelect.dispatchEvent(new Event('change'));
@@ -1029,7 +1227,7 @@ async function main() {
       get state() {
         return {
           phase, cur, opponent, knives, areas: regions.map(regionArea), message: msgEl.textContent, info: infoEl.textContent,
-          stands, marks, cracks: cracks.length, inHand, field: field.map((k) => ({ owner: k.owner, pos: k.pos })), flashes: flashes.length, camera: camera.position.toArray(), look: camLook.toArray(),
+          stands, marks, seams, regions, cracks: cracks.length, inHand, field: field.map((k) => ({ owner: k.owner, pos: k.pos })), flashes: flashes.length, camera: camera.position.toArray(), look: camLook.toArray(),
         };
       },
     };
@@ -1037,6 +1235,13 @@ async function main() {
 }
 
 // ---------- Вспомогательное ----------
+/** Расстояние от точки p (внутри круга радиуса r с центром в 0) по направлению d (единичному) до края круга. */
+function rayToCircle(p: Vec2, d: Vec2, r: number): number {
+  const b = p[0] * d[0] + p[1] * d[1];
+  const c = p[0] * p[0] + p[1] * p[1] - r * r;
+  return Math.max(0, -b + Math.sqrt(Math.max(0, b * b - c)));
+}
+
 function gauss(): number {
   const u = 1 - Math.random();
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * Math.random());
@@ -1061,26 +1266,7 @@ const saveKnife = (k: KnifeId) => save('knives.knife', k);
 const loadOpponent = () => load<Opponent>('knives.opponent', (v) => v === 'human' || v in BOT_LEVELS, 'medium');
 const saveOpponent = (o: Opponent) => save('knives.opponent', o);
 
-function dirtTexture(): THREE.Texture {
-  const c = document.createElement('canvas');
-  c.width = c.height = 512;
-  const g = c.getContext('2d')!;
-  g.fillStyle = '#8a6a4a';
-  g.fillRect(0, 0, 512, 512);
-  for (let i = 0; i < 9000; i++) {
-    const v = 70 + Math.random() * 80;
-    g.fillStyle = `rgba(${v + 45},${v + 20},${v - 15},0.28)`;
-    g.beginPath();
-    g.arc(Math.random() * 512, Math.random() * 512, Math.random() * 3 + 0.5, 0, Math.PI * 2);
-    g.fill();
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(10, 10);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
-
+/** Тонировка территории поверх половика (без контуров: границу показывает нитка). */
 function regionMesh(region: Region, color: number, opacity: number, y: number): THREE.Group {
   const group = new THREE.Group();
   if (!region.length) return group;
@@ -1092,38 +1278,25 @@ function regionMesh(region: Region, color: number, opacity: number, y: number): 
   });
   const mesh = new THREE.Mesh(
     new THREE.ShapeGeometry(shapes),
-    new THREE.MeshStandardMaterial({ color, transparent: true, opacity, roughness: 1, side: THREE.DoubleSide, depthWrite: false }),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false }),
   );
   mesh.rotation.x = -Math.PI / 2;
   mesh.position.y = y;
-  mesh.receiveShadow = true;
   group.add(mesh);
-  const lineMat = new THREE.LineBasicMaterial({ color: 0x2a1d12 });
-  for (const poly of region)
-    for (const ring of poly)
-      group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ring.map(([x, z]) => new THREE.Vector3(x, y + 0.001, z))), lineMat));
   return group;
 }
 
-function createFigure(color: number) {
-  const group = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.7 });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.5, 6, 16), mat);
-  body.position.y = 0.42;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.1, 20, 16), new THREE.MeshStandardMaterial({ color: 0xf1c7a0, roughness: 0.8 }));
-  head.position.y = 0.86;
-  for (const m of [body, head]) {
-    m.castShadow = true;
-    group.add(m);
-  }
+/** Кот игрока (0 — рыжий, 1 — серый) и кольцо: сколько места ему нужно, чтобы сидеть. */
+function createFigure(color: number, coat: number) {
+  const { group, body } = createCat(coat);
   const footRing = new THREE.Mesh(
     new THREE.RingGeometry(FOOT_R - 0.01, FOOT_R, 40),
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.7 }),
   );
   footRing.rotation.x = -Math.PI / 2;
-  footRing.position.y = 0.01;
+  footRing.position.y = 0.012;
   group.add(footRing);
-  return { group };
+  return { group, body };
 }
 
 function disposeObject(obj: THREE.Object3D) {
