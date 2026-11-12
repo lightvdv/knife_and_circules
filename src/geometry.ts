@@ -28,12 +28,39 @@ export function halfPlane(p: Vec2, dir: Vec2, side: 1 | -1, size = 50): Polygon 
   return [[a, b, c, d, a]];
 }
 
-export function intersect(a: Region | Polygon, b: Region | Polygon): Region {
-  return polygonClipping.intersection(a, b);
+type Geom = Region | Polygon;
+
+const isMulti = (g: Geom): g is Region => g.length > 0 && Array.isArray(g[0][0][0]);
+const asMulti = (g: Geom): Region => (isMulti(g) ? g : g.length ? [g as Polygon] : []);
+
+/** Округляет координаты к сетке eps: убирает почти совпадающие точки на швах разрезов. */
+function snap(g: Geom, eps: number): Region {
+  const r = (v: number) => Math.round(v / eps) * eps;
+  return asMulti(g).map((poly) => poly.map((ring) => ring.map(([x, y]) => [r(x), r(y)] as Pair)));
 }
 
-export function union(a: Region | Polygon, b: Region | Polygon): Region {
-  return polygonClipping.union(a, b);
+/**
+ * polygon-clipping иногда падает на почти совпадающих точках («Unable to complete output ring»).
+ * Пробуем с округлением всё грубее; если не вышло — используем запасной вариант.
+ */
+function robust(op: (a: Geom, b: Geom) => Region, a: Geom, b: Geom, fallback: () => Region): Region {
+  for (const eps of [1e-9, 1e-7, 1e-5]) {
+    try {
+      return op(snap(a, eps), snap(b, eps));
+    } catch {
+      /* пробуем грубее */
+    }
+  }
+  return fallback();
+}
+
+export function intersect(a: Geom, b: Geom): Region {
+  return robust(polygonClipping.intersection, a, b, () => []);
+}
+
+/** Объединение. Куски у нас никогда не пересекаются, поэтому в крайнем случае их можно просто сложить. */
+export function union(a: Geom, b: Geom): Region {
+  return robust(polygonClipping.union, a, b, () => [...asMulti(a), ...asMulti(b)]);
 }
 
 /** Разрезает регион прямой на две части (каждая может быть пустой). */
