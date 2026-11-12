@@ -6,8 +6,13 @@
 import * as THREE from 'three';
 import { fitModel, rawModel, baseMaterial, tintedMaterial, setMaterial, type ModelName } from './assets';
 
-/** Высота сидящего кота (≈ 0,3 м по-настоящему; кот на четырёх лапах). */
-export const CAT_HEIGHT = 0.85;
+/**
+ * Масштаб: игровые единицы на настоящий метр. Половик (радиус 1,5) при M = 1,8 — около 1,7 м
+ * в поперечнике: большой бабушкин половик, на котором коты маленькие.
+ */
+const M = 1.8;
+/** Высота сидящего кота (≈ 0,29 м по-настоящему; кот на четырёх лапах). */
+export const CAT_HEIGHT = 0.29 * M;
 
 // ---------- Текстуры из файлов ----------
 const texLoader = new THREE.TextureLoader();
@@ -537,8 +542,6 @@ export function createPaw(coat: number): THREE.Group {
 }
 
 // ---------- Комната ----------
-// Масштаб: игровые единицы ≈ 2,9 × настоящих метров (кот видит комнату снизу — мебель большая).
-const M = 2.9;
 /** Полуширина комнаты (≈ 4,1 м) и высота стен (≈ 2,6 м). */
 export const ROOM_HALF = 2.05 * M;
 const WALL_H = 2.6 * M;

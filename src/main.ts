@@ -13,6 +13,7 @@ import {
 import {
   createRug, createCat, createPaw, createYarnBall, threadMesh, floorMaterial, createRoom, ROOM_COLOR, PAW_FIT,
 } from './look';
+import { PaintRenderer } from './paint';
 import { loadModels } from './assets';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
@@ -127,14 +128,15 @@ async function main() {
   loadingEl.textContent = '';
 
   // ---------- Рендер ----------
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  // Сглаживание не нужно: кадр всё равно проходит через гуашевую обработку (src/paint.ts).
+  const renderer = new THREE.WebGLRenderer({ antialias: false });
+  // Больше 1,5 не нужно: мазки и так крупнее пикселя, а фильтр Кувахары дорогой.
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
   renderer.setSize(innerWidth, innerHeight);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  // Плёночная кривая тонов — мягче пересветы, свет ближе к фото.
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  // Кривая тонов и палитра — в гуашевой обработке; сцена рисуется в линейном HDR.
+  const paint = new PaintRenderer(renderer);
   $('app').appendChild(renderer.domElement);
   const canvas = renderer.domElement;
 
@@ -392,7 +394,7 @@ async function main() {
   function rebuildTerritories() {
     for (let i = 0; i < 2; i++) {
       clearGroup(territoryGroups[i]);
-      territoryGroups[i].add(regionMesh(regions[i], COLORS[i], 0.32, 0.007));
+      territoryGroups[i].add(regionMesh(regions[i], COLORS[i], 0.2, 0.007));
       // Игрок остаётся, где стоял, если там ещё есть место; иначе — на самое просторное место.
       if (!canStand(stands[i], regions[i])) stands[i] = largestInscribed(regions[i]).center;
       figures[i].group.position.set(stands[i][0], 0, stands[i][1]);
@@ -1120,6 +1122,8 @@ async function main() {
     camera.fov = camera.aspect < 1 ? CAM.fovPortrait : camera.aspect > 1.9 ? CAM.fovWide : CAM.fovLandscape;
     camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
+    const px = renderer.getDrawingBufferSize(new THREE.Vector2());
+    paint.setSize(px.x, px.y);
     trailCanvas.width = innerWidth * devicePixelRatio;
     trailCanvas.height = innerHeight * devicePixelRatio;
   }
@@ -1152,7 +1156,7 @@ async function main() {
     last = nowMs;
     update(nowMs / 1000, dt);
     drawTrail(nowMs / 1000);
-    renderer.render(scene, camera);
+    paint.render(scene, camera);
     requestAnimationFrame(frame);
   }
 
@@ -1248,7 +1252,7 @@ async function main() {
         let now = performance.now() / 1000;
         for (let t = 0; t < seconds; t += 1 / 60) update((now += 1 / 60), 1 / 60);
         drawTrail(now);
-        renderer.render(scene, camera);
+        paint.render(scene, camera);
       },
       /** Сразу выполнить отложенное действие (смена хода, бросок бота). */
       flush() {
