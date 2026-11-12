@@ -10,3 +10,5 @@
 - Команды: `npm run dev` (порт 5173), `npm run build` (проверка типов + сборка).
 - В dev-режиме есть отладочный хук `window.__game` (`throwSwipe`, `setKnife`, `setOpponent`, `autoPlace`, `botThrow`, `flush`, `simulate`, `state`).
   `simulate` нужен, потому что в скрытой вкладке браузера `requestAnimationFrame` не идёт.
+- 3D-модели, картинки и звуки — через MCP-сервер 3D AI Studio (`3daistudio`); как подключить и как работать —
+  в docs/CONCEPT.md, раздел «Графика и модели». Простые формы (спицы, клубки, половик) делаем в коде.
