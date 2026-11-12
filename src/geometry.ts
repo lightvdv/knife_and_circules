@@ -118,7 +118,7 @@ function distToSegment(px: number, py: number, ax: number, ay: number, bx: numbe
   return Math.sqrt(cx * cx + cy * cy);
 }
 
-function distToBoundary([x, y]: Vec2, region: Region): number {
+export function distToBoundary([x, y]: Vec2, region: Region): number {
   let best = Infinity;
   for (const poly of region)
     for (const ring of poly)
@@ -163,4 +163,22 @@ export function largestInscribed(region: Region): { center: Vec2; radius: number
     step /= 4;
   }
   return { center: best, radius: bestR };
+}
+
+export function difference(a: Geom, b: Geom): Region {
+  return robust(polygonClipping.difference, a, b, () => asMulti(a));
+}
+
+/** Связные куски региона. */
+export function components(region: Region): Region[] {
+  return region.map((poly) => [poly]);
+}
+
+/** Тонкая полоска вдоль отрезка ab шириной w. */
+export function segmentStrip([ax, ay]: Vec2, [bx, by]: Vec2, w: number): Polygon {
+  const len = Math.hypot(bx - ax, by - ay) || 1;
+  const nx = (-(by - ay) / len) * (w / 2);
+  const ny = ((bx - ax) / len) * (w / 2);
+  const p1: Pair = [ax + nx, ay + ny];
+  return [[p1, [bx + nx, by + ny], [bx - nx, by - ny], [ax - nx, ay - ny], p1]];
 }
