@@ -4,10 +4,10 @@
 // Пол, обои и нитка — текстуры материалов из того же сервиса (public/textures).
 // Правила и физика отсюда не зависят: это только то, как всё выглядит.
 import * as THREE from 'three';
-import { fitModel, rawModel, baseMaterial, tintedMaterial, setMaterial } from './assets';
+import { fitModel, rawModel, baseMaterial, tintedMaterial, setMaterial, type ModelName } from './assets';
 
-/** Рост стоящего кота (кот антропоморфный, ходит на задних лапах). */
-export const CAT_HEIGHT = 1.0;
+/** Высота сидящего кота (≈ 0,3 м по-настоящему; кот на четырёх лапах). */
+export const CAT_HEIGHT = 0.85;
 
 // ---------- Текстуры из файлов ----------
 const texLoader = new THREE.TextureLoader();
@@ -105,7 +105,7 @@ export function floorMaterial(size: number): THREE.MeshStandardMaterial {
     roughness: 0.85,
   });
   // Текстура ярко-красная — приглушаем к красно-коричневой половой краске: пол — фон.
-  return tintedMaterial(base, 0xc08a70, 0.55);
+  return tintedMaterial(base, 0xa27a62, 0.72);
 }
 
 /** Пол из крашеных досок (процедурный, прежний вариант). */
@@ -243,19 +243,38 @@ function tabbyTexture(base: string, stripe: string): THREE.Texture {
 
 // ---------- Объекты ----------
 
-/** Половик: тонкий диск с текстурой косичек и чуть приподнятым краем. */
 /** Верх половика: тонировка земель и нитки лежат выше (0,007 и больше). */
 const RUG_TOP = 0.005;
 
+/**
+ * Половик: тонкий диск с фото настоящего плетёного половика сверху (public/textures/rug_top.jpg)
+ * и тёмным краем. Если фото не загрузится — процедурная текстура косичек.
+ */
 export function createRug(radius: number): THREE.Group {
-  const model = fitModel('rug', { size: radius * 2 });
-  if (model) {
-    // Модель толстая (≈ 8 % диаметра) — сплющиваем: рельеф даёт карта нормалей.
-    const h = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3()).y;
-    model.scale.y = RUG_TOP / h;
-    model.traverse((o) => (o.castShadow = false));
-    return model;
-  }
+  const group = new THREE.Group();
+  const photo = texLoader.load(`${import.meta.env.BASE_URL}textures/rug_top.jpg`);
+  photo.colorSpace = THREE.SRGBColorSpace;
+  photo.anisotropy = 8;
+  // Круг на фото чуть меньше кадра — берём середину, чтобы на краю не было белого фона.
+  photo.repeat.set(0.965, 0.965);
+  photo.offset.set(0.0175, 0.0175);
+  const disc = new THREE.Mesh(
+    new THREE.CylinderGeometry(radius, radius * 1.01, RUG_TOP, 128, 1),
+    [
+      new THREE.MeshStandardMaterial({ color: 0x7d6a55, roughness: 1 }), // бок
+      new THREE.MeshStandardMaterial({ map: photo, roughness: 1 }), // верх
+      new THREE.MeshStandardMaterial({ color: 0x7d6a55, roughness: 1 }), // низ
+    ],
+  );
+  // У цилиндра UV верхней крышки — квадрат вокруг круга, как у CircleGeometry.
+  disc.position.y = RUG_TOP / 2;
+  disc.receiveShadow = true;
+  group.add(disc);
+  return group;
+}
+
+/** Прежний процедурный половик (запасной вариант). */
+export function createRugProcedural(radius: number): THREE.Group {
   const group = new THREE.Group();
   const top = new THREE.Mesh(
     new THREE.CircleGeometry(radius, 128),
@@ -369,7 +388,7 @@ export function createYarnBall(owner: number, hp: number): THREE.Group {
  * body — всё, кроме кольца-следа: его прячем, когда смотрим глазами этого кота.
  */
 export function createCat(coat: number): { group: THREE.Group; body: THREE.Group } {
-  // Модель смотрит по +X; у нас морда кота — по +Z.
+  // Перед модели (после поправки FRONT) — +X; у нас морда кота — по +Z.
   const model = fitModel(coat === 0 ? 'cat_ginger' : 'cat_gray', { height: CAT_HEIGHT, rotY: -Math.PI / 2 });
   if (model) {
     const group = new THREE.Group();
@@ -447,17 +466,17 @@ export function createCat(coat: number): { group: THREE.Group; body: THREE.Group
  */
 /** Подгонка модели лапы — вынесена, чтобы подбирать в отладке (window.__game.paw). */
 export const PAW_FIT = {
-  /** Длина модели (предплечье с кулаком). */
-  size: 0.24,
+  /** Длина модели (предплечье с лапой). */
+  size: 0.36,
   /**
-   * Отверстие в кулаке под спицу в координатах модели (куб 1×1×1). Кулак держит палку вертикально:
-   * отверстие идёт вдоль Y модели, предплечье — вдоль +Z.
+   * Точка хвата в координатах модели (куб 1×1×1): у подушечек пальцев.
+   * Модель — настоящая кошачья лапа, вытянута вдоль X: пальцы на +X, срез предплечья на −X.
    */
-  hole: new THREE.Vector3(0.03, 0, -0.33),
+  hole: new THREE.Vector3(0.3, 0, 0.15),
   /** Куда уходит предплечье (в координатах лапы: +X — вправо, +Y — вниз по экрану, −Z — к камере). */
-  arm: new THREE.Vector3(0.6, 0, -1),
-  /** Перевернуть кулак вдоль спицы (большим пальцем к острию). */
-  flip: false,
+  arm: new THREE.Vector3(0.7, 0.45, -1),
+  /** Куда смотрят подушечки (+Z модели) — к спице. */
+  pads: new THREE.Vector3(-1, -0.2, 0),
 };
 
 /** Серая лапа — та же модель, обесцвеченная. */
@@ -466,11 +485,10 @@ let grayPawMat: THREE.Material | null = null;
 function modelPaw(coat: number): THREE.Group | null {
   const raw = rawModel('paw');
   if (!raw) return null;
-  // Базис: Y модели (ось отверстия, к большому пальцу) → вверх по экрану (−Y лапы), к навершию спицы;
-  // Z модели (предплечье) → PAW_FIT.arm.
-  const y = new THREE.Vector3(0, PAW_FIT.flip ? 1 : -1, 0);
-  const z = PAW_FIT.arm.clone().addScaledVector(y, -PAW_FIT.arm.dot(y)).normalize();
-  const x = y.clone().cross(z);
+  // Базис: −X модели (к локтю) → PAW_FIT.arm, +Z модели (подушечки) → PAW_FIT.pads.
+  const x = PAW_FIT.arm.clone().normalize().negate();
+  const z = PAW_FIT.pads.clone().addScaledVector(x, -PAW_FIT.pads.dot(x)).normalize();
+  const y = z.clone().cross(x);
   raw.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
   raw.scale.setScalar(PAW_FIT.size);
   raw.position.copy(PAW_FIT.hole).multiplyScalar(PAW_FIT.size).applyQuaternion(raw.quaternion).negate();
@@ -519,68 +537,100 @@ export function createPaw(coat: number): THREE.Group {
 }
 
 // ---------- Комната ----------
-/** Полуширина комнаты и высота стен (игровые единицы ≈ 2,9 × «кошачьих» метров). */
-export const ROOM_HALF = 5.2;
-const WALL_H = 7;
+// Масштаб: игровые единицы ≈ 2,9 × настоящих метров (кот видит комнату снизу — мебель большая).
+const M = 2.9;
+/** Полуширина комнаты (≈ 4,1 м) и высота стен (≈ 2,6 м). */
+export const ROOM_HALF = 2.05 * M;
+const WALL_H = 2.6 * M;
+
+/** Плоскость-картинка на стене (окно, ковёр). */
+function wallPicture(name: string, w: number, h: number, rough = 1): THREE.Mesh {
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, h),
+    new THREE.MeshStandardMaterial({ map: fileTexture(name, true), roughness: rough }),
+  );
+  m.receiveShadow = true;
+  return m;
+}
 
 /**
- * Бабушкина комната вокруг половика: обои, ковёр на стене, сервант, кресло, корзинка, тапки.
- * Расставлено вдоль X, а коты смотрят друг на друга вдоль Z — поэтому в конце комната повёрнута:
- * ковёр на стене оказывается за спиной серого кота (его видит рыжий), сервант — за спиной рыжего.
+ * Бабушкина комната 80-х вокруг половика. Коты смотрят друг на друга вдоль Z:
+ * - рыжий смотрит на −Z: там диван с пледом, над ним ковёр, рядом торшер;
+ * - серый смотрит на +Z: там стенка с хрусталём и телевизор на тумбе;
+ * - на стене +X окно с тюлем и геранью, под ним батарея, у окна кресло; у стены −X корзинка.
+ * Перед моделей из сервиса — +X; rotY поворачивает его в нужную сторону.
  */
 export function createRoom(): THREE.Group {
   const room = new THREE.Group();
   const W = ROOM_HALF;
 
-  // Стены — внутрь комнаты.
+  // Стены — внутрь комнаты, с плинтусом.
   const wallRep: [number, number] = [(2 * W) / 1.75, WALL_H / 1.75];
   const wallMat = new THREE.MeshStandardMaterial({
     map: fileTexture('wall_color', true, wallRep),
     normalMap: fileTexture('wall_normal', false, wallRep),
-    color: 0xe9dfcc,
+    color: 0xe6dccb,
     roughness: 0.95,
   });
-  const skirtMat = feltMaterial(0x5b3424);
+  const skirtMat = new THREE.MeshStandardMaterial({ color: 0x4a2c1e, roughness: 0.6 });
   for (let i = 0; i < 4; i++) {
-    const a = (i * Math.PI) / 2;
     const side = new THREE.Group();
-    side.rotation.y = a;
+    side.rotation.y = (i * Math.PI) / 2;
     const wall = new THREE.Mesh(new THREE.PlaneGeometry(2 * W, WALL_H), wallMat);
     wall.position.set(0, WALL_H / 2, -W);
     wall.receiveShadow = true;
-    // Плинтус.
-    const skirt = new THREE.Mesh(new THREE.BoxGeometry(2 * W, 0.22, 0.06), skirtMat);
-    skirt.position.set(0, 0.11, -W + 0.03);
+    const skirt = new THREE.Mesh(new THREE.BoxGeometry(2 * W, 0.08 * M, 0.02 * M), skirtMat);
+    skirt.position.set(0, 0.04 * M, -W + 0.01 * M);
     skirt.receiveShadow = true;
     side.add(wall, skirt);
     room.add(side);
   }
-
-  // Ковёр на стене −X (после поворота — −Z).
-  const carpetTex = fileTexture('wall_carpet', true);
-  const carpet = new THREE.Mesh(
-    new THREE.PlaneGeometry(5.4, 3.6),
-    new THREE.MeshStandardMaterial({ map: carpetTex, roughness: 1 }),
+  // Потолок — чтобы сверху (обзор) не было пустоты.
+  const ceiling = new THREE.Mesh(
+    new THREE.PlaneGeometry(2 * W, 2 * W),
+    new THREE.MeshStandardMaterial({ color: 0xf2eee6, roughness: 1 }),
   );
-  carpet.rotation.y = Math.PI / 2;
-  carpet.position.set(-W + 0.04, 2.35, 0); // низко: камера смотрит вниз на половик
-  carpet.receiveShadow = true;
-  room.add(carpet);
+  ceiling.rotation.x = Math.PI / 2;
+  ceiling.position.y = WALL_H;
+  room.add(ceiling);
 
-  /** Поставить модель: перед модели (+X) повернуть на rotY, низ — на пол. */
-  const put = (name: Parameters<typeof fitModel>[0], height: number, x: number, z: number, rotY: number) => {
-    const m = fitModel(name, { height, rotY });
-    if (!m) return;
+  /** Поставить модель: высота в метрах, позиция, куда смотрит перед (угол от +X против часовой сверху). */
+  const put = (name: ModelName, heightM: number, x: number, z: number, rotY: number) => {
+    const m = fitModel(name, { height: heightM * M, rotY });
+    if (!m) return null;
     m.position.set(x, 0, z);
     room.add(m);
+    return m;
   };
-  // Сервант у стены +X, смотрит в комнату (−X).
-  put('sideboard', 4.6, W - 0.95, -1.2, Math.PI);
-  // Кресло в углу, развёрнуто к половику.
-  put('armchair', 2.5, W - 1.7, W - 1.6, Math.PI * 0.75);
-  // Корзинка с клубками и тапки — рядом с половиком.
-  put('basket', 0.95, -1.9, 2.1, 0.4);
-  put('slippers', 0.3, -2.4, -1.6, 2.2);
-  room.rotation.y = -Math.PI / 2; // (x, z) → (−z, x): стена −X становится стеной −Z
+  // Повороты: перед +X → смотрит на −Z: rotY = π/2; на +Z: −π/2; на −X: π.
+  const FACE_MZ = Math.PI / 2;
+  const FACE_PZ = -Math.PI / 2;
+  const FACE_MX = Math.PI;
+
+  // Стена −Z: диван, над ним ковёр, торшер в углу.
+  put('sofa', 0.85, -0.6, -W + 0.5 * M, FACE_PZ);
+  const carpet = wallPicture('wall_carpet', 2.0 * M, 1.35 * M);
+  carpet.position.set(-0.6, 0.95 * M + 0.675 * M, -W + 0.01);
+  room.add(carpet);
+  put('lamp', 1.6, W - 0.35 * M, -W + 0.35 * M, FACE_PZ);
+
+  // Стена +Z: стенка и телевизор.
+  put('stenka', 2.0, -0.9, W - 0.3 * M, FACE_MZ);
+  put('tv', 1.15, W - 0.5 * M, W - 0.45 * M, FACE_MZ + 0.5);
+
+  // Стена +X: окно, батарея под ним, кресло у окна.
+  const win = wallPicture('window', 1.35 * M, 1.8 * M, 0.6);
+  win.rotation.y = -Math.PI / 2;
+  win.position.set(W - 0.01, 0.75 * M + 0.9 * M, 0);
+  (win.material as THREE.MeshStandardMaterial).emissive.set(0xffffff);
+  (win.material as THREE.MeshStandardMaterial).emissiveMap = fileTexture('window', true);
+  (win.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.55; // свет с улицы
+  room.add(win);
+  put('radiator', 0.6, W - 0.08 * M, 0, FACE_MX);
+  put('armchair', 0.85, W - 0.5 * M, 1.1 * M, FACE_MX - 0.6);
+
+  // Возле половика: корзинка с вязанием и тапки.
+  put('basket', 0.3, -0.85 * M, -0.75 * M, 0.4);
+  put('slippers', 0.12, 0.8 * M, -0.8 * M, 2.2);
   return room;
 }

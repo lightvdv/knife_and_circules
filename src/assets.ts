@@ -2,18 +2,31 @@
 // Модели грузятся один раз до старта игры. Если какая-то не загрузилась — look.ts рисует
 // процедурную замену, игра от этого не ломается.
 //
-// Все модели из сервиса нормированы в куб 1×1×1 с центром в нуле; «перед» у котов и мебели — по +X.
+// Все модели из сервиса нормированы в куб 1×1×1 с центром в нуле; «перед» у мебели — по +X.
 // Копии делят геометрию и материалы с оригиналом (помечены userData.shared) — их не освобождаем.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 export const MODEL_NAMES = [
-  'cat_ginger', 'cat_gray', 'rug', 'yarn', 'paw', 'needle',
-  'slippers', 'sideboard', 'armchair', 'basket',
+  'cat_ginger', 'cat_gray', 'yarn', 'paw', 'needle',
+  'stenka', 'sofa', 'tv', 'armchair', 'lamp', 'radiator', 'basket', 'slippers',
 ] as const;
 export type ModelName = (typeof MODEL_NAMES)[number];
 
 const cache = new Map<ModelName, THREE.Object3D>();
+
+/**
+ * Где у модели «перед»: Prism ставит модель так, как предмет стоял на эталонной картинке.
+ * Значение — поворот вокруг Y, после которого перед смотрит на +X (общее правило для fitModel).
+ * Перед по −Z → −π/2, по +Z → +π/2, по +X → 0. Проверено глазами по каждой модели.
+ */
+const FRONT: Partial<Record<ModelName, number>> = {
+  cat_ginger: Math.PI / 2,
+  cat_gray: -Math.PI / 2,
+  stenka: -Math.PI / 2,
+  sofa: -Math.PI / 2,
+  armchair: -Math.PI / 2,
+};
 
 /** Загрузить все модели; onProgress — для надписи «Загрузка…». */
 export async function loadModels(onProgress?: (done: number, total: number) => void): Promise<void> {
@@ -29,9 +42,8 @@ export async function loadModels(onProgress?: (done: number, total: number) => v
         m.castShadow = true;
         m.receiveShadow = true;
         const mat = m.material as THREE.MeshStandardMaterial;
-        // Войлок матовый: карта metallicRoughness из сервиса иногда даёт блеск.
+        // Металла в комнате нет (кроме спиц — у них свой материал); шероховатость — из текстуры.
         mat.metalness = 0;
-        mat.roughness = 1;
       });
       cache.set(name, gltf.scene);
     } catch (e) {
@@ -53,7 +65,7 @@ export interface FitOptions {
   height?: number;
   /** Или длина самой большой стороны. */
   size?: number;
-  /** Поворот модели вокруг Y (перед модели — +X; −π/2 — мордой по +Z). */
+  /** Поворот вокруг Y: перед модели (после поправки FRONT — +X); −π/2 — мордой по +Z. */
   rotY?: number;
   /** Поворот вместо rotY, если нужен произвольный. */
   rotation?: THREE.Euler;
@@ -66,7 +78,7 @@ export function fitModel(name: ModelName, o: FitOptions): THREE.Group | null {
   const inner = rawModel(name);
   if (!inner) return null;
   if (o.rotation) inner.rotation.copy(o.rotation);
-  else inner.rotation.y = o.rotY ?? 0;
+  else inner.rotation.y = (FRONT[name] ?? 0) + (o.rotY ?? 0);
   inner.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(inner);
   const s = box.getSize(new THREE.Vector3());

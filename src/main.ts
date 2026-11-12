@@ -14,6 +14,7 @@ import {
   createRug, createCat, createPaw, createYarnBall, threadMesh, floorMaterial, createRoom, ROOM_COLOR, PAW_FIT,
 } from './look';
 import { loadModels } from './assets';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
   crackFrom, markHit, canPlaceMark, splitPieces, capturedPieces, guardingMark,
   MARK_R, MARK_HP, MARKS_PER_PLAYER, MIN_PIECE, GUARD_DAMAGE, type Crack, type Mark,
@@ -131,23 +132,30 @@ async function main() {
   renderer.setSize(innerWidth, innerHeight);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // Плёночная кривая тонов — мягче пересветы, свет ближе к фото.
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
   $('app').appendChild(renderer.domElement);
   const canvas = renderer.domElement;
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(ROOM_COLOR);
-  scene.fog = new THREE.Fog(ROOM_COLOR, 14, 40);
+  // Отражённый свет комнаты: без него модели с PBR-материалами выглядят плоскими.
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  scene.environmentIntensity = 0.45;
 
   const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.02, 100);
   scene.add(camera); // нужно, чтобы лапа со спицей (дочерний объект камеры) рисовалась
 
-  // Ровный дневной свет из окна, без «золотого часа».
-  scene.add(new THREE.HemisphereLight(0xfff4e2, 0x6a4a35, 1.25));
-  const sun = new THREE.DirectionalLight(0xfff1dc, 1.7);
-  sun.position.set(-3, 6, 2.5);
+  // Дневной свет из окна (стена +X): тёплое солнце сбоку и мягкий рассеянный свет.
+  scene.add(new THREE.HemisphereLight(0xfff4e2, 0x6a4a35, 0.7));
+  const sun = new THREE.DirectionalLight(0xffecd2, 2.4);
+  sun.position.set(9, 7, 1.5);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  Object.assign(sun.shadow.camera, { left: -4, right: 4, top: 4, bottom: -4, near: 0.5, far: 20 });
+  sun.shadow.bias = -0.0005;
+  Object.assign(sun.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 0.5, far: 30 });
   sun.shadow.camera.updateProjectionMatrix();
   scene.add(sun);
 
@@ -1195,14 +1203,15 @@ async function main() {
         return 'thrown';
       },
       collect,
-      /** Подогнать модель лапы: paw({ size, arm: [x, y, z], hole: [x, y, z], flip }). */
-      paw(fit: { size?: number; arm?: number[]; hole?: number[]; flip?: boolean }) {
+      /** Подогнать модель лапы: paw({ size, arm: [x, y, z], hole: [x, y, z], pads: [x, y, z] }). */
+      paw(fit: { size?: number; arm?: number[]; hole?: number[]; pads?: number[] }) {
         if (fit.size !== undefined) PAW_FIT.size = fit.size;
         if (fit.arm) PAW_FIT.arm.fromArray(fit.arm);
         if (fit.hole) PAW_FIT.hole.fromArray(fit.hole);
-        if (fit.flip !== undefined) PAW_FIT.flip = fit.flip;
+        if (fit.pads) PAW_FIT.pads.fromArray(fit.pads);
         rebuildPaws();
-        return { ...PAW_FIT, arm: PAW_FIT.arm.toArray(), hole: PAW_FIT.hole.toArray() };
+        const v = (a: THREE.Vector3) => a.toArray();
+        return { size: PAW_FIT.size, arm: v(PAW_FIT.arm), hole: v(PAW_FIT.hole), pads: v(PAW_FIT.pads) };
       },
       /** Где на экране (в CSS-пикселях) точка поля x, z на высоте y. */
       project(x: number, z: number, y = 0) {
