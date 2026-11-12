@@ -2,6 +2,10 @@
 // Локальные оси ножа: +Y — к острию, X — ширина лезвия, Z — толщина (нормаль плоскости клинка).
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
+import { fitModel, baseMaterial, tintedMaterial, setMaterial } from './assets';
+
+/** Металлическая спица — та же модель бамбуковой, но серая и с блеском (материал общий). */
+let metalNeedleMat: THREE.MeshStandardMaterial | null = null;
 
 export const BLADE = { halfW: 0.014, len: 0.13, halfT: 0.002, density: 7.8 };
 export const HANDLE = { halfW: 0.011, len: 0.1, halfT: 0.008, density: 0.9 };
@@ -50,16 +54,39 @@ export function createNeedleMesh(kind: NeedleKind, knobColor: number, knobR = 0.
     ? new THREE.MeshStandardMaterial({ color: 0xc9ced4, metalness: 0.85, roughness: 0.3 })
     : new THREE.MeshStandardMaterial({ color: 0xd9b77a, roughness: 0.7 });
 
-  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(r, r, shaftLen, 12), mat);
-  shaft.position.y = bottom + shaftLen / 2;
-  const tip = new THREE.Mesh(new THREE.ConeGeometry(r, tipLen, 12), mat);
-  tip.position.y = BLADE.len - tipLen / 2;
   const knob = new THREE.Mesh(
     new THREE.SphereGeometry(knobR, 16, 12),
     new THREE.MeshStandardMaterial({ color: knobColor, roughness: 0.6 }),
   );
   knob.position.y = bottom;
-  for (const m of [shaft, tip, knob]) {
+  knob.castShadow = true;
+  group.add(knob);
+
+  // Модель спицы лежит вдоль Z, острие — к −Z; поворот на +90° вокруг X ставит острие в +Y.
+  const model = fitModel('needle', {
+    rotation: new THREE.Euler(Math.PI / 2, 0, 0), anchor: 'center',
+  });
+  if (model) {
+    const len = BLADE.len - bottom;
+    // fitModel без height подгоняет самую длинную сторону к 1 — растягиваем до длины спицы.
+    model.scale.setScalar(len);
+    model.position.y = (BLADE.len + bottom) / 2;
+    if (kind === 'metal') {
+      const base = baseMaterial('needle');
+      if (base) {
+        metalNeedleMat ??= Object.assign(tintedMaterial(base, 0xd4d9de, 1), { metalness: 0.8, roughness: 0.35 });
+        setMaterial(model, metalNeedleMat);
+      }
+    }
+    group.add(model);
+    return group;
+  }
+
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(r, r, shaftLen, 12), mat);
+  shaft.position.y = bottom + shaftLen / 2;
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(r, tipLen, 12), mat);
+  tip.position.y = BLADE.len - tipLen / 2;
+  for (const m of [shaft, tip]) {
     m.castShadow = true;
     group.add(m);
   }

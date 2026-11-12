@@ -10,7 +10,10 @@ import {
   createNeedleMesh, createKnifeBody, planRelease, landingTime,
   TIP_LOCAL, GRIP_LOCAL, HULL_POINTS_LOCAL, HELD_TIP_ANGLE, type KnifeBody, type Release, type NeedleKind,
 } from './knife';
-import { createRug, createCat, createPaw, createYarnBall, threadMesh, floorTexture, ROOM_COLOR } from './look';
+import {
+  createRug, createCat, createPaw, createYarnBall, threadMesh, floorMaterial, createRoom, ROOM_COLOR, PAW_FIT,
+} from './look';
+import { loadModels } from './assets';
 import {
   crackFrom, markHit, canPlaceMark, splitPieces, capturedPieces, guardingMark,
   MARK_R, MARK_HP, MARKS_PER_PLAYER, MIN_PIECE, GUARD_DAMAGE, type Crack, type Mark,
@@ -114,7 +117,13 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 const UP = new THREE.Vector3(0, 1, 0);
 
 async function main() {
-  await RAPIER.init();
+  const loadingEl = $('message');
+  loadingEl.textContent = 'Загрузка…';
+  await Promise.all([
+    RAPIER.init(),
+    loadModels((done, total) => (loadingEl.textContent = `Загрузка… ${done} из ${total}`)),
+  ]);
+  loadingEl.textContent = '';
 
   // ---------- Рендер ----------
   const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -127,7 +136,7 @@ async function main() {
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(ROOM_COLOR);
-  scene.fog = new THREE.Fog(ROOM_COLOR, 7, 18);
+  scene.fog = new THREE.Fog(ROOM_COLOR, 14, 40);
 
   const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.02, 100);
   scene.add(camera); // нужно, чтобы лапа со спицей (дочерний объект камеры) рисовалась
@@ -144,12 +153,12 @@ async function main() {
 
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(40, 40),
-    new THREE.MeshStandardMaterial({ map: floorTexture(), roughness: 0.95, color: 0xcfc4bc }),
+    floorMaterial(40),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
   scene.add(ground);
-  scene.add(createRug(CIRCLE_R));
+  scene.add(createRug(CIRCLE_R), createRoom());
 
   // ---------- Физика ----------
   const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
@@ -219,9 +228,17 @@ async function main() {
   const hand = new THREE.Group();
   let heldKnife = new THREE.Group();
   let heldKey = '';
-  const paws = [createPaw(0), createPaw(1)];
+  let paws = [createPaw(0), createPaw(1)];
   paws.forEach((p) => hand.add(p));
   camera.add(hand);
+  /** Пересобрать лапы (после подгонки PAW_FIT в отладке). */
+  function rebuildPaws() {
+    paws.forEach((p) => hand.remove(p));
+    paws = [createPaw(0), createPaw(1)];
+    paws.forEach((p) => hand.add(p));
+    heldKey = '';
+    updateHeld();
+  }
 
   /** Какая спица у игрока: лёгкие ножи — бамбуковые, тяжёлые — металлические. */
   const needleKind = (p: number): NeedleKind => (knifeOf(p).assist >= 0.7 ? 'bamboo' : 'metal');
@@ -376,7 +393,7 @@ async function main() {
     figures[1].group.lookAt(stands[0][0], 0, stands[0][1]);
     territoryGroups[0].add(threadMesh(borderSegments().map(([a, b]) => [
       new THREE.Vector3(a[0], 0.014, a[1]), new THREE.Vector3(b[0], 0.014, b[1]),
-    ]), BORDER_COLOR, 0.016));
+    ]), BORDER_COLOR, 0.016, true));
     updateHud();
   }
 
@@ -1178,6 +1195,15 @@ async function main() {
         return 'thrown';
       },
       collect,
+      /** Подогнать модель лапы: paw({ size, arm: [x, y, z], hole: [x, y, z], flip }). */
+      paw(fit: { size?: number; arm?: number[]; hole?: number[]; flip?: boolean }) {
+        if (fit.size !== undefined) PAW_FIT.size = fit.size;
+        if (fit.arm) PAW_FIT.arm.fromArray(fit.arm);
+        if (fit.hole) PAW_FIT.hole.fromArray(fit.hole);
+        if (fit.flip !== undefined) PAW_FIT.flip = fit.flip;
+        rebuildPaws();
+        return { ...PAW_FIT, arm: PAW_FIT.arm.toArray(), hole: PAW_FIT.hole.toArray() };
+      },
       /** Где на экране (в CSS-пикселях) точка поля x, z на высоте y. */
       project(x: number, z: number, y = 0) {
         const v = new THREE.Vector3(x, y, z).project(camera);
@@ -1302,10 +1328,10 @@ function createFigure(color: number, coat: number) {
 function disposeObject(obj: THREE.Object3D) {
   obj.traverse((o) => {
     const m = o as THREE.Mesh;
+    if (m.userData.shared) return; // копия загруженной модели: геометрия и материал общие
     m.geometry?.dispose();
-    const mat = m.material;
-    if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
-    else mat?.dispose();
+    const mats = Array.isArray(m.material) ? m.material : m.material ? [m.material] : [];
+    mats.forEach((x) => !x.userData.keep && x.dispose()); // keep — общий кэшированный материал
   });
 }
 

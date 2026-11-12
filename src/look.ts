@@ -1,7 +1,31 @@
-// Внешний вид сеттинга «Бабушкин половик»: пол, плетёный половик, валяные коты, лапа, клубки, нитки.
-// Всё процедурное (canvas-текстуры и простые формы), без загружаемых моделей.
+// Внешний вид сеттинга «Бабушкин половик»: комната, плетёный половик, валяные коты, лапа, клубки, нитки.
+// Половик, коты, лапа, клубки и мебель — GLB-модели из 3D AI Studio (src/assets.ts);
+// если модель не загрузилась, рисуется процедурная замена из простых форм.
+// Пол, обои и нитка — текстуры материалов из того же сервиса (public/textures).
 // Правила и физика отсюда не зависят: это только то, как всё выглядит.
 import * as THREE from 'three';
+import { fitModel, rawModel, baseMaterial, tintedMaterial, setMaterial } from './assets';
+
+/** Рост стоящего кота (кот антропоморфный, ходит на задних лапах). */
+export const CAT_HEIGHT = 1.0;
+
+// ---------- Текстуры из файлов ----------
+const texLoader = new THREE.TextureLoader();
+const texCache = new Map<string, THREE.Texture>();
+/** Текстура из public/textures; color — цветовая (sRGB), иначе карта нормалей и т. п. */
+function fileTexture(name: string, color: boolean, repeat?: [number, number]): THREE.Texture {
+  const key = `${name}:${repeat?.join('x') ?? ''}`;
+  let t = texCache.get(key);
+  if (!t) {
+    t = texLoader.load(`${import.meta.env.BASE_URL}textures/${name}.jpg`);
+    if (color) t.colorSpace = THREE.SRGBColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = 8;
+    if (repeat) t.repeat.set(...repeat);
+    texCache.set(key, t);
+  }
+  return t;
+}
 
 // ---------- Палитра ----------
 /** Приглушённые цвета лоскутов половика. */
@@ -71,7 +95,20 @@ export function feltMaterial(color: THREE.ColorRepresentation, map?: THREE.Textu
   });
 }
 
-/** Пол из крашеных досок. */
+/** Пол из крашеных досок: материал из сервиса (цвет + нормали); size — сторона плоскости пола. */
+export function floorMaterial(size: number): THREE.MeshStandardMaterial {
+  // Плитка текстуры — около 4 досок, ≈ 1,5 игровой единицы.
+  const rep: [number, number] = [size / 1.5, size / 1.5];
+  const base = new THREE.MeshStandardMaterial({
+    map: fileTexture('floor_color', true, rep),
+    normalMap: fileTexture('floor_normal', false, rep),
+    roughness: 0.85,
+  });
+  // Текстура ярко-красная — приглушаем к красно-коричневой половой краске: пол — фон.
+  return tintedMaterial(base, 0xc08a70, 0.55);
+}
+
+/** Пол из крашеных досок (процедурный, прежний вариант). */
 export function floorTexture(): THREE.Texture {
   const rand = rng(11);
   const t = canvasTexture(512, 512, (g) => {
@@ -207,7 +244,18 @@ function tabbyTexture(base: string, stripe: string): THREE.Texture {
 // ---------- Объекты ----------
 
 /** Половик: тонкий диск с текстурой косичек и чуть приподнятым краем. */
+/** Верх половика: тонировка земель и нитки лежат выше (0,007 и больше). */
+const RUG_TOP = 0.005;
+
 export function createRug(radius: number): THREE.Group {
+  const model = fitModel('rug', { size: radius * 2 });
+  if (model) {
+    // Модель толстая (≈ 8 % диаметра) — сплющиваем: рельеф даёт карта нормалей.
+    const h = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3()).y;
+    model.scale.y = RUG_TOP / h;
+    model.traverse((o) => (o.castShadow = false));
+    return model;
+  }
   const group = new THREE.Group();
   const top = new THREE.Mesh(
     new THREE.CircleGeometry(radius, 128),
@@ -228,14 +276,50 @@ export function createRug(radius: number): THREE.Group {
 }
 
 /** Шерстяная нитка по ломаной: цилиндры по отрезкам и шарики на стыках. */
-export function threadMesh(segments: [THREE.Vector3, THREE.Vector3][], color: number, r: number): THREE.Group {
+/**
+ * Материал шерстяной нитки. Текстура — снимок скрученной красной нитки на сером фоне:
+ * берём только полосу с ниткой (см. threadUVs). Красная — как есть, другие — обесцвеченная и перекрашенная.
+ */
+const threadMats = new Map<number, THREE.MeshStandardMaterial>();
+function threadMaterial(color: number, red: boolean): THREE.MeshStandardMaterial {
+  let m = threadMats.get(color);
+  if (!m) {
+    const base = new THREE.MeshStandardMaterial({
+      map: fileTexture('thread_color', true),
+      normalMap: fileTexture('thread_normal', false),
+      roughness: 1,
+    });
+    m = red ? base : tintedMaterial(base, new THREE.Color(color).multiplyScalar(2.2), 1);
+    m.userData.keep = true; // общий на все нитки — не освобождать при пересборке
+    threadMats.set(color, m);
+  }
+  return m;
+}
+
+/** UV цилиндра нитки: вдоль нитки — повтор каждые 6 радиусов, по кругу — полоса снимка, где нитка. */
+function threadUVs(geo: THREE.CylinderGeometry, len: number, r: number) {
+  const uv = geo.attributes.uv as THREE.BufferAttribute;
+  for (let i = 0; i < uv.count; i++) {
+    const around = uv.getX(i);
+    const along = uv.getY(i);
+    // Без шва по кругу: туда и обратно по полосе 0,36…0,64.
+    uv.setXY(i, (along * len) / (6 * r), 0.36 + 0.28 * Math.abs(2 * around - 1));
+  }
+  uv.needsUpdate = true;
+}
+
+export function threadMesh(
+  segments: [THREE.Vector3, THREE.Vector3][], color: number, r: number, red = false,
+): THREE.Group {
   const group = new THREE.Group();
-  const mat = feltMaterial(color);
+  const mat = threadMaterial(color, red);
   const joint = new THREE.SphereGeometry(r, 10, 8);
   for (const [a, b] of segments) {
     const len = a.distanceTo(b);
     if (len < 1e-4) continue;
-    const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 8, 1), mat);
+    const geo = new THREE.CylinderGeometry(r, r, len, 8, 1, true);
+    threadUVs(geo, len, r);
+    const m = new THREE.Mesh(geo, mat);
     m.position.copy(a).add(b).multiplyScalar(0.5);
     m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize());
     m.castShadow = true;
@@ -250,10 +334,20 @@ export function threadMesh(segments: [THREE.Vector3, THREE.Vector3][], color: nu
 }
 
 /** Клубок: размер — прочность метки (1 — маленький, 3 — большой), с хвостиком нитки. */
+/** Клубок-модель кремовый — перекрашиваем в цвет владельца (материал общий на всех клубков игрока). */
+const yarnMats: THREE.Material[] = [];
+
 export function createYarnBall(owner: number, hp: number): THREE.Group {
-  const group = new THREE.Group();
   const r = [0, 0.05, 0.07, 0.09][hp] ?? 0.09;
   const color = YARN_COLORS[owner];
+  const model = fitModel('yarn', { height: 2 * r, rotY: hp * 1.3 + owner * 0.7 });
+  const base = baseMaterial('yarn');
+  if (model && base) {
+    yarnMats[owner] ??= tintedMaterial(base, new THREE.Color(color).multiplyScalar(1.25), 1);
+    setMaterial(model, yarnMats[owner]);
+    return model;
+  }
+  const group = new THREE.Group();
   const ball = new THREE.Mesh(new THREE.SphereGeometry(r, 28, 20), feltMaterial(0xffffff, yarnTexture(color)));
   ball.position.y = r;
   ball.rotation.set(0.4 * owner + 0.3 * hp, hp, 0.2);
@@ -275,6 +369,13 @@ export function createYarnBall(owner: number, hp: number): THREE.Group {
  * body — всё, кроме кольца-следа: его прячем, когда смотрим глазами этого кота.
  */
 export function createCat(coat: number): { group: THREE.Group; body: THREE.Group } {
+  // Модель смотрит по +X; у нас морда кота — по +Z.
+  const model = fitModel(coat === 0 ? 'cat_ginger' : 'cat_gray', { height: CAT_HEIGHT, rotY: -Math.PI / 2 });
+  if (model) {
+    const group = new THREE.Group();
+    group.add(model);
+    return { group, body: model };
+  }
   const c = CAT_COATS[coat];
   const fur = feltMaterial(0xffffff, tabbyTexture(c.base, c.stripe));
   const plain = feltMaterial(c.base);
@@ -344,7 +445,48 @@ export function createCat(coat: number): { group: THREE.Group; body: THREE.Group
  * Кошачья лапа, держащая спицу (вид от первого лица).
  * Начало координат — точка хвата; предплечье уходит вниз-вправо к краю экрана.
  */
+/** Подгонка модели лапы — вынесена, чтобы подбирать в отладке (window.__game.paw). */
+export const PAW_FIT = {
+  /** Длина модели (предплечье с кулаком). */
+  size: 0.24,
+  /**
+   * Отверстие в кулаке под спицу в координатах модели (куб 1×1×1). Кулак держит палку вертикально:
+   * отверстие идёт вдоль Y модели, предплечье — вдоль +Z.
+   */
+  hole: new THREE.Vector3(0.03, 0, -0.33),
+  /** Куда уходит предплечье (в координатах лапы: +X — вправо, +Y — вниз по экрану, −Z — к камере). */
+  arm: new THREE.Vector3(0.6, 0, -1),
+  /** Перевернуть кулак вдоль спицы (большим пальцем к острию). */
+  flip: false,
+};
+
+/** Серая лапа — та же модель, обесцвеченная. */
+let grayPawMat: THREE.Material | null = null;
+
+function modelPaw(coat: number): THREE.Group | null {
+  const raw = rawModel('paw');
+  if (!raw) return null;
+  // Базис: Y модели (ось отверстия, к большому пальцу) → вверх по экрану (−Y лапы), к навершию спицы;
+  // Z модели (предплечье) → PAW_FIT.arm.
+  const y = new THREE.Vector3(0, PAW_FIT.flip ? 1 : -1, 0);
+  const z = PAW_FIT.arm.clone().addScaledVector(y, -PAW_FIT.arm.dot(y)).normalize();
+  const x = y.clone().cross(z);
+  raw.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+  raw.scale.setScalar(PAW_FIT.size);
+  raw.position.copy(PAW_FIT.hole).multiplyScalar(PAW_FIT.size).applyQuaternion(raw.quaternion).negate();
+  if (coat === 1) {
+    const base = baseMaterial('paw');
+    if (base) setMaterial(raw, (grayPawMat ??= tintedMaterial(base, 0xc4c8ce, 0.92)));
+  }
+  raw.traverse((o) => (o.castShadow = false));
+  const g = new THREE.Group();
+  g.add(raw);
+  return g;
+}
+
 export function createPaw(coat: number): THREE.Group {
+  const model = modelPaw(coat);
+  if (model) return model;
   const c = CAT_COATS[coat];
   const g = new THREE.Group();
   const fur = feltMaterial(c.base);
@@ -374,4 +516,71 @@ export function createPaw(coat: number): THREE.Group {
   arm.position.copy(dir).multiplyScalar(0.14);
   g.add(arm);
   return g;
+}
+
+// ---------- Комната ----------
+/** Полуширина комнаты и высота стен (игровые единицы ≈ 2,9 × «кошачьих» метров). */
+export const ROOM_HALF = 5.2;
+const WALL_H = 7;
+
+/**
+ * Бабушкина комната вокруг половика: обои, ковёр на стене, сервант, кресло, корзинка, тапки.
+ * Расставлено вдоль X, а коты смотрят друг на друга вдоль Z — поэтому в конце комната повёрнута:
+ * ковёр на стене оказывается за спиной серого кота (его видит рыжий), сервант — за спиной рыжего.
+ */
+export function createRoom(): THREE.Group {
+  const room = new THREE.Group();
+  const W = ROOM_HALF;
+
+  // Стены — внутрь комнаты.
+  const wallRep: [number, number] = [(2 * W) / 1.75, WALL_H / 1.75];
+  const wallMat = new THREE.MeshStandardMaterial({
+    map: fileTexture('wall_color', true, wallRep),
+    normalMap: fileTexture('wall_normal', false, wallRep),
+    color: 0xe9dfcc,
+    roughness: 0.95,
+  });
+  const skirtMat = feltMaterial(0x5b3424);
+  for (let i = 0; i < 4; i++) {
+    const a = (i * Math.PI) / 2;
+    const side = new THREE.Group();
+    side.rotation.y = a;
+    const wall = new THREE.Mesh(new THREE.PlaneGeometry(2 * W, WALL_H), wallMat);
+    wall.position.set(0, WALL_H / 2, -W);
+    wall.receiveShadow = true;
+    // Плинтус.
+    const skirt = new THREE.Mesh(new THREE.BoxGeometry(2 * W, 0.22, 0.06), skirtMat);
+    skirt.position.set(0, 0.11, -W + 0.03);
+    skirt.receiveShadow = true;
+    side.add(wall, skirt);
+    room.add(side);
+  }
+
+  // Ковёр на стене −X (после поворота — −Z).
+  const carpetTex = fileTexture('wall_carpet', true);
+  const carpet = new THREE.Mesh(
+    new THREE.PlaneGeometry(5.4, 3.6),
+    new THREE.MeshStandardMaterial({ map: carpetTex, roughness: 1 }),
+  );
+  carpet.rotation.y = Math.PI / 2;
+  carpet.position.set(-W + 0.04, 2.35, 0); // низко: камера смотрит вниз на половик
+  carpet.receiveShadow = true;
+  room.add(carpet);
+
+  /** Поставить модель: перед модели (+X) повернуть на rotY, низ — на пол. */
+  const put = (name: Parameters<typeof fitModel>[0], height: number, x: number, z: number, rotY: number) => {
+    const m = fitModel(name, { height, rotY });
+    if (!m) return;
+    m.position.set(x, 0, z);
+    room.add(m);
+  };
+  // Сервант у стены +X, смотрит в комнату (−X).
+  put('sideboard', 4.6, W - 0.95, -1.2, Math.PI);
+  // Кресло в углу, развёрнуто к половику.
+  put('armchair', 2.5, W - 1.7, W - 1.6, Math.PI * 0.75);
+  // Корзинка с клубками и тапки — рядом с половиком.
+  put('basket', 0.95, -1.9, 2.1, 0.4);
+  put('slippers', 0.3, -2.4, -1.6, 2.2);
+  room.rotation.y = -Math.PI / 2; // (x, z) → (−z, x): стена −X становится стеной −Z
+  return room;
 }
