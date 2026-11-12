@@ -28,6 +28,7 @@ const COLORS = [0x3b82f6, 0xe5484d];
 const NAMES = ['Синий', 'Красный'];
 const CIRCLE_AREA = Math.PI * CIRCLE_R * CIRCLE_R;
 const BOT = 1; // бот играет за красных
+const KNIVES_PER_PLAYER = 5; // сколько ножей у каждого в начале партии
 const WALK_SPEED = 0.8; // м/с, шаг по своей земле
 const LOOK_SENS = 0.004; // рад на пиксель при повороте правой кнопкой
 
@@ -67,6 +68,7 @@ type Opponent = 'human' | BotLevel;
 type Phase = 'place' | 'aim' | 'gesture' | 'flying' | 'wait' | 'over';
 
 interface FlyingKnife {
+  owner: number;
   kb: KnifeBody;
   mesh: THREE.Group;
   release: Release;
@@ -78,6 +80,13 @@ interface FlyingKnife {
 }
 
 interface Sample { x: number; y: number; t: number }
+
+/** Нож, оставшийся на поле: воткнулся или упал. */
+interface FieldKnife {
+  owner: number;
+  mesh: THREE.Group;
+  pos: Vec2;
+}
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const UP = new THREE.Vector3(0, 1, 0);
@@ -149,6 +158,9 @@ async function main() {
   let opponent: Opponent = loadOpponent();
   const knives: [KnifeId, KnifeId] = [loadKnife(), loadKnife()];
   let knife: FlyingKnife | null = null;
+  /** Ножи в руке у каждого и ножи, лежащие на поле. */
+  const inHand = [KNIVES_PER_PLAYER, KNIVES_PER_PLAYER];
+  let field: FieldKnife[] = [];
   const stands: Vec2[] = [[0, 0], [0, 0]];
   let pendingTimer: number | undefined;
   let gesture: Sample[] = [];
@@ -226,14 +238,19 @@ async function main() {
     $('turn').innerHTML =
       `<span class="dot" style="background:#${COLORS[cur].toString(16).padStart(6, '0')}"></span>` +
       (phase === 'place' ? `Метки: ${who}` : `Ход: ${who}`);
-    for (let i = 0; i < 2; i++) $(`score${i}`).textContent = `${Math.round((regionArea(regions[i]) / CIRCLE_AREA) * 100)}%`;
+    for (let i = 0; i < 2; i++)
+      $(`score${i}`).textContent = `${Math.round((regionArea(regions[i]) / CIRCLE_AREA) * 100)}% · ножей ${inHand[i]}`;
+    const canCollect = phase === 'aim' && !isBot(cur) ? pickable(cur).length : 0;
+    $('collect').hidden = !canCollect;
+    $('collect').textContent = `Собрать ножи (${canCollect})`;
     knifeSelect.value = knives[selectedPlayer()];
     const k = knifeOf(cur);
     $('hint').innerHTML = phase === 'place'
-      ? `Нажми на свою землю, чтобы поставить метку. Линия разреза останавливается на целой метке, а пробить метку можно только ножом.`
+      ? `Нажми на свою землю, чтобы поставить метку: первая — прочность 1, вторая — 2, третья — 3. ` +
+        `Кусок под целой меткой не отрезать: вместо этого метка теряет прочность.`
       : `<b>Рывок вверх</b>: длина — дальность, резкость — закрутка (нужен один оборот), вбок — направление · ` +
         `<b>Правая кнопка</b> — осмотреться, <b>WASD</b> — шаг по своей земле · ` +
-        `Линия упирается в целые метки соперника · <b>${k.label}</b>: помощь ${Math.round(k.assist * 100)}%, ` +
+        `Нож, не отрезавший землю, остаётся в поле; ножи на земле соперника не забрать, пока не отрежешь её · <b>${k.label}</b>: помощь ${Math.round(k.assist * 100)}%, ` +
         `урон по метке ${k.damage}, шатание ±${k.wobble}°`;
   }
 
@@ -426,15 +443,50 @@ async function main() {
     knife = null;
   }
 
+  /** Брошенный нож остаётся лежать (или торчать) там, где оказался. */
+  function parkKnife() {
+    if (!knife) return;
+    const t = knife.kb.body.translation();
+    world.removeRigidBody(knife.kb.body);
+    field.push({ owner: knife.owner, mesh: knife.mesh, pos: [t.x, t.z] });
+    knife = null;
+  }
+
+  /** Свои ножи, которые можно подобрать: всё, что не на земле соперника. */
+  const pickable = (p: number) => field.filter((k) => k.owner === p && !pointInRegion(k.pos, regions[1 - p]));
+
+  function takeBack(list: FieldKnife[]) {
+    for (const k of list) {
+      scene.remove(k.mesh);
+      disposeObject(k.mesh);
+      inHand[k.owner]++;
+    }
+    field = field.filter((k) => !list.includes(k));
+  }
+
+  /** Вместо броска собрать свои ножи. */
+  function collect() {
+    if (phase !== 'aim') return;
+    const list = pickable(cur);
+    if (!list.length) return;
+    takeBack(list);
+    passTurn(`${NAMES[cur]} собирает ножи: +${list.length}`, 1200);
+    updateHud();
+  }
+
   function launchRelease(release: Release) {
     removeKnife();
+    if (inHand[cur] <= 0) return;
+    inHand[cur]--;
     const mesh = createKnifeMesh();
     scene.add(mesh);
     knife = {
+      owner: cur,
       kb: createKnifeBody(world, planRelease(release)), mesh, release,
       t0: performance.now() / 1000, simTime: 0, contacted: false, contactTime: 0, stuck: false,
     };
     phase = 'flying';
+    updateHud();
     setMessage('');
     infoEl.textContent =
       `${release.speed.toFixed(1)} м/с · вращение ${(release.spin / (2 * Math.PI)).toFixed(1)} об/с`;
@@ -583,7 +635,7 @@ async function main() {
     const mark = markHit(p, marks, opp);
     if (mark) {
       damageMark(mark, knifeOf(cur).damage);
-      passTurn(mark.hp > 0 ? `Попал в метку! Прочность ${mark.hp} из ${MARK_HP}` : 'Метка пробита!');
+      passTurn(mark.hp > 0 ? `Попал в метку! Осталось прочности: ${mark.hp}` : 'Метка пробита!');
       return;
     }
 
@@ -600,7 +652,7 @@ async function main() {
     if (guard) {
       damageMark(guard, GUARD_DAMAGE);
       passTurn(guard.hp > 0
-        ? `Метка защитила землю: прочность ${guard.hp} из ${MARK_HP}`
+        ? `Метка защитила землю, осталось прочности: ${guard.hp}`
         : 'Метка защитила землю и сломалась — теперь здесь можно резать!');
       return;
     }
@@ -628,25 +680,39 @@ async function main() {
       pendingTimer = window.setTimeout(() => gameOver(cur), 1200);
       return;
     }
-    passTurn(`Отрезал ${Math.round((gained / CIRCLE_AREA) * 100)}% круга!`, 2000);
+    // Отрезал — выдернул свой нож; заодно забрал свои ножи, лежавшие на отрезанной земле.
+    removeKnife();
+    inHand[cur]++;
+    const found = field.filter((k) => k.owner === cur && captured.some((piece) => pointInRegion(k.pos, piece)));
+    takeBack(found);
+    updateHud();
+    const extra = found.length ? ` и ещё +${found.length}` : '';
+    passTurn(`Отрезал ${Math.round((gained / CIRCLE_AREA) * 100)}% круга! Нож вернулся${extra}`, 2000);
   }
 
   function nextTurn() {
     pendingTimer = undefined;
-    removeKnife();
+    parkKnife();
     cracks = [];
     rebuildCracks();
     cur = 1 - cur;
     phase = 'aim';
     updateHud();
-    setMessage(`Бросает ${NAMES[cur]}`);
+    if (inHand[cur] === 0 && !pickable(cur).length) {
+      gameOver(1 - cur, `У игрока ${NAMES[cur]} кончились ножи`);
+      return;
+    }
+    setMessage(inHand[cur] === 0 && !isBot(cur)
+      ? 'Ножи кончились — нажми «Собрать ножи»'
+      : `Бросает ${NAMES[cur]}`);
     if (isBot(cur)) pendingTimer = window.setTimeout(botThrow, 1400);
   }
 
-  function gameOver(winner: number) {
+  function gameOver(winner: number, reason = '') {
     phase = 'over';
-    setMessage('');
-    $('overlay-title').textContent = `Победил ${NAMES[winner]}${isBot(winner) ? ' (бот)' : ''}!`;
+    setMessage(reason);
+    const why = reason ? ` ${reason}.` : '';
+    $('overlay-title').textContent = `Победил ${NAMES[winner]}${isBot(winner) ? ' (бот)' : ''}!${why}`;
     $('overlay').hidden = false;
   }
 
@@ -661,15 +727,16 @@ async function main() {
       return;
     }
     updateHud();
-    setMessage(`${NAMES[p]}: поставь метки на свою землю — осталось ${MARKS_PER_PLAYER}`);
+    setMessage(`${NAMES[p]}: поставь метки на свою землю — первая с прочностью 1`);
   }
 
   function placeMark(c: Vec2): boolean {
     if (phase !== 'place' || !canPlaceMark(c, regions[cur], marks)) return false;
-    marks.push({ owner: cur, c, hp: MARK_HP });
+    const placed = marks.filter((m) => m.owner === cur).length;
+    marks.push({ owner: cur, c, hp: Math.min(MARK_HP, placed + 1) }); // первая — 1, вторая — 2, третья — 3
     rebuildMarks();
-    const left = MARKS_PER_PLAYER - marks.filter((m) => m.owner === cur).length;
-    if (left > 0) setMessage(`${NAMES[cur]}: поставь метки на свою землю — осталось ${left}`);
+    const left = MARKS_PER_PLAYER - placed - 1;
+    if (left > 0) setMessage(`${NAMES[cur]}: следующая метка — прочность ${placed + 2}`);
     else finishPlacement(cur);
     return true;
   }
@@ -690,6 +757,12 @@ async function main() {
   function botThrow() {
     pendingTimer = undefined;
     if (phase !== 'aim' || !isBot(cur) || opponent === 'human') return;
+    // Нечем бросать или последний нож, а подобрать можно несколько — собирает.
+    const pk = pickable(cur).length;
+    if (inHand[cur] === 0 || (inHand[cur] === 1 && pk >= 2)) {
+      collect();
+      return;
+    }
     aimAsBot(opponent);
   }
 
@@ -727,6 +800,8 @@ async function main() {
     if (pendingTimer !== undefined) clearTimeout(pendingTimer);
     pendingTimer = undefined;
     removeKnife();
+    takeBack(field);
+    inHand[0] = inHand[1] = KNIVES_PER_PLAYER;
     regions = initialRegions();
     stands[0] = [0, 0];
     stands[1] = [0, 0];
@@ -780,7 +855,7 @@ async function main() {
       if (p && !placeMark([p.x, p.z])) setMessage('Сюда нельзя: метка должна быть на твоей земле и не задевать другие метки');
       return;
     }
-    if (phase !== 'aim' || isBot(cur)) return;
+    if (phase !== 'aim' || isBot(cur) || inHand[cur] <= 0) return;
     phase = 'gesture';
     gesture = [];
     trail = [];
@@ -821,6 +896,7 @@ async function main() {
   addEventListener('keyup', (e) => keys.delete(e.code));
   addEventListener('blur', () => keys.clear());
   $('restart').addEventListener('click', reset);
+  $('collect').addEventListener('click', collect);
   $('overlay-restart').addEventListener('click', reset);
 
   function resize() {
@@ -908,6 +984,7 @@ async function main() {
         launchRelease(swipeRelease(THREE.MathUtils.degToRad(yawDeg), speed, spin));
         return 'thrown';
       },
+      collect,
       setKnife(k: KnifeId) {
         knifeSelect.value = k;
         knifeSelect.dispatchEvent(new Event('change'));
@@ -952,7 +1029,7 @@ async function main() {
       get state() {
         return {
           phase, cur, opponent, knives, areas: regions.map(regionArea), message: msgEl.textContent, info: infoEl.textContent,
-          stands, marks, cracks: cracks.length, flashes: flashes.length, camera: camera.position.toArray(), look: camLook.toArray(),
+          stands, marks, cracks: cracks.length, inHand, field: field.map((k) => ({ owner: k.owner, pos: k.pos })), flashes: flashes.length, camera: camera.position.toArray(), look: camLook.toArray(),
         };
       },
     };

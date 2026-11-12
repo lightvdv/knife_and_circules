@@ -1,6 +1,6 @@
 // Бот: где ставить метки и куда бросать.
 import { pointInRegion, distToBoundary, difference, segmentStrip, components, regionArea, type Region, type Vec2 } from './geometry';
-import { crackFrom, markHit, canPlaceMark, capturedPieces, guardingMark, CRACK_W, MIN_PIECE, MARKS_PER_PLAYER, MARK_HP, type Mark } from './rules';
+import { crackFrom, markHit, canPlaceMark, capturedPieces, guardingMark, CRACK_W, MIN_PIECE, MARKS_PER_PLAYER, type Mark } from './rules';
 
 export type BotLevel = 'easy' | 'medium' | 'hard';
 
@@ -45,7 +45,7 @@ export function botPlaceMarks(own: Region, owner: number, stand: Vec2, marks: Ma
       if (score > bestScore) { bestScore = score; best = c; }
     }
     if (!best) break;
-    placed.push({ owner, c: best, hp: MARK_HP });
+    placed.push({ owner, c: best, hp: MARKS_PER_PLAYER - i }); // самое выгодное место — самой прочной метке
   }
   return placed;
 }
