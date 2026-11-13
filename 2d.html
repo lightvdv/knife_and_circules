@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>Ножички 2D</title>
+  </head>
+  <body>
+    <div id="app"><canvas id="board"></canvas></div>
+    <canvas id="trail"></canvas>
+    <div id="hud">
+      <div id="top">
+        <div id="turn"></div>
+        <div id="scores">
+          <span class="score p0"><i></i><b id="score0">50%</b></span>
+          <span class="score p1"><i></i><b id="score1">50%</b></span>
+        </div>
+      </div>
+      <div id="message"></div>
+      <div id="bottom">
+        <div id="throwinfo"></div>
+        <div id="controls">
+          <select id="knife" title="Спица" aria-label="Спица"></select>
+          <select id="opponent" title="Соперник" aria-label="Соперник"></select>
+          <button id="collect" hidden>Собрать спицы</button>
+          <button id="restart">Новая игра</button>
+        </div>
+        <div id="hint"></div>
+      </div>
+    </div>
+    <div id="overlay" hidden>
+      <div id="overlay-card">
+        <h1 id="overlay-title"></h1>
+        <button id="overlay-restart">Сыграть ещё</button>
+      </div>
+    </div>
+    <script type="module" src="/src/game2d.ts"></script>
+  </body>
+</html>
