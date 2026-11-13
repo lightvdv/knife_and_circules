@@ -1,4 +1,4 @@
-// 2D-прототип «Ножичков»: вид на половик сверху, рисованная графика на Canvas.
+// 2D-прототип «Ножичков»: вид с уровня глаз кота через половик, рисованная графика на Canvas.
 // Правила (линия разреза, метки-клубки, захват кусков) и бот — общие с 3D-версией (rules.ts, bot.ts).
 // Физику броска здесь заменяет простая модель: длина рывка — дальность, резкость — закрутка;
 // спица втыкается, если к земле успела сделать почти целое число оборотов (≈ ±40° от вертикали).
@@ -100,12 +100,6 @@ function save(key: string, v: string) {
   }
 }
 
-function loadImage(name: string): HTMLImageElement {
-  const img = new Image();
-  img.src = `${import.meta.env.BASE_URL}textures/${name}.jpg`;
-  return img;
-}
-
 // ---------- Состояние ----------
 const initialRegions = (): [Region, Region] => {
   const circle = circlePolygon(CIRCLE_R);
@@ -143,56 +137,175 @@ const selectedPlayer = () => (opponent === 'human' ? cur : 1 - BOT);
 const canStand = (p: Vec2, region: Region) => pointInRegion(p, region) && distToBoundary(p, region) >= FOOT_R;
 const pickable = (p: number) => field.filter((k) => k.owner === p && !pointInRegion(k.pos, regions[1 - p]));
 
-// ---------- Экран ----------
+// ---------- Экран и камера ----------
+// Камера на уровне глаз кота: чуть позади и правее своего кота («из-за плеча»), смотрит через половик
+// на соперника. Проекция — настоящая перспектива; пол, половик и стены рисуются полосками
+// (Canvas 2D умеет только аффинные преобразования, а полоска в перспективе — это просто сдвиг и масштаб).
 const canvas = $<HTMLCanvasElement>('board');
 const ctx = canvas.getContext('2d')!;
 const trailCanvas = $<HTMLCanvasElement>('trail');
 const trailCtx = trailCanvas.getContext('2d')!;
 let W = 0, H = 0, DPR = 1;
-/** Масштаб (пикселей на единицу) и центр половика на экране. */
-let S = 100, CX = 0, CY = 0;
-/** Поворот вида: свой кот всегда внизу. */
+
+const CAM = {
+  height: 0.8, // высота глаз, ед. (кот сидя ≈ 0,55)
+  back: 1.05, // насколько позади своего кота
+  side: 0.38, // и правее — свой кот виден слева внизу
+  lookAhead: 1.7, // куда смотрим: точка на полу впереди кота
+  fovLandscape: 52,
+  fovPortrait: 72,
+};
+const CAT_H = 0.55;
+/** Комната (как в 3D): полуширина и высота стен. */
+const ROOM_HALF = 3.69;
+const WALL_H = (2 * ROOM_HALF) / 1.5;
+const NEAR = 0.08;
+
+/** Поворот вида: 0 — смотрим как рыжий (к −y), π — как серый. */
 let viewRot = 0;
+/** Камера в повёрнутых координатах (вперёд — к −y). */
+const cam = { x: 0, y: 2, phi: 0.3, F: 500, cx: 0, cy: 0 };
+let camTarget: Vec2 = [0, 2];
 
 function resize() {
   DPR = Math.min(devicePixelRatio, 2);
   W = innerWidth;
   H = innerHeight;
-  for (const c of [canvas, trailCanvas]) {
+  for (const c of [canvas, trailCanvas, bgCanvas]) {
     c.width = W * DPR;
     c.height = H * DPR;
   }
-  // Место под панели сверху и снизу.
-  const top = 70, bottom = W < 700 ? 190 : 150;
-  const avail = Math.min(W - 24, H - top - bottom);
-  S = avail / (2 * (CIRCLE_R + 0.12));
-  CX = W / 2;
-  CY = top + (H - top - bottom) / 2;
+  const fov = ((W < H ? CAM.fovPortrait : CAM.fovLandscape) * Math.PI) / 180;
+  cam.F = H / 2 / Math.tan(fov / 2);
+  cam.cx = W / 2;
+  cam.cy = H / 2;
+  bgKey = '';
 }
-addEventListener('resize', resize);
-resize();
 
-function toScreen([x, y]: Vec2): Vec2 {
+/** Мир → повёрнутые координаты (свой кот внизу, вперёд — к −y). */
+function rot([x, y]: Vec2): Vec2 {
   const c = Math.cos(viewRot), s = Math.sin(viewRot);
-  return [CX + (x * c - y * s) * S, CY + (x * s + y * c) * S];
+  return [x * c - y * s, x * s + y * c];
 }
-function toWorld(sx: number, sy: number): Vec2 {
-  const x = (sx - CX) / S, y = (sy - CY) / S;
+function unrot([x, y]: Vec2): Vec2 {
   const c = Math.cos(-viewRot), s = Math.sin(-viewRot);
   return [x * c - y * s, x * s + y * c];
 }
-/** Вектор направления (мир → экран), без сдвига. */
-function dirToScreen([x, y]: Vec2): Vec2 {
-  const c = Math.cos(viewRot), s = Math.sin(viewRot);
-  return [x * c - y * s, x * s + y * c];
+
+/** Точка в повёрнутых координатах (x, y — по полу, h — высота) → экран и глубина. */
+function projR(x: number, y: number, h: number): { x: number; y: number; d: number } {
+  const dx = x - cam.x;
+  const dz = cam.y - y; // вперёд
+  const dy = h - CAM.height;
+  const c = Math.cos(cam.phi), s = Math.sin(cam.phi);
+  const d = dz * c - dy * s;
+  const v = dy * c + dz * s;
+  const dd = Math.max(d, 1e-3);
+  return { x: cam.cx + (cam.F * dx) / dd, y: cam.cy - (cam.F * v) / dd, d };
+}
+function proj(p: Vec2, h = 0) {
+  const [x, y] = rot(p);
+  return projR(x, y, h);
+}
+/** Экран → точка на полу (мир) или null, если луч смотрит выше горизонта. */
+function groundAt(sx: number, sy: number): Vec2 | null {
+  const r = groundAtR(sx, sy);
+  return r ? unrot([r.x, r.y]) : null;
+}
+function groundAtR(sx: number, sy: number): { x: number; y: number; t: number } | null {
+  const a = (sx - cam.cx) / cam.F, b = -(sy - cam.cy) / cam.F;
+  const c = Math.cos(cam.phi), s = Math.sin(cam.phi);
+  const up = -s + b * c;
+  if (up >= -1e-4) return null;
+  const t = CAM.height / -up;
+  return { x: cam.x + a * t, y: cam.y - (c + b * s) * t, t };
+}
+/** Отрезаем всё, что позади камеры (иначе проекция выворачивается). */
+const nearY = () => cam.y + (CAM.height * Math.sin(cam.phi) - NEAR) / Math.cos(cam.phi);
+function clipRing(ring: Vec2[]): Vec2[] {
+  const lim = nearY();
+  const out: Vec2[] = [];
+  for (let i = 0; i < ring.length; i++) {
+    const a = rot(ring[i]), b = rot(ring[(i + 1) % ring.length]);
+    const ina = a[1] <= lim, inb = b[1] <= lim;
+    if (ina) out.push(a);
+    if (ina !== inb) {
+      const t = (lim - a[1]) / (b[1] - a[1]);
+      out.push([a[0] + (b[0] - a[0]) * t, lim]);
+    }
+  }
+  return out;
 }
 
-// ---------- Картинки и фактуры ----------
-const rugImg = loadImage('rug_top');
-const floorImg = loadImage('floor_paint');
-let floorPattern: CanvasPattern | null = null;
+// ---------- Картинки ----------
+function loadImage(path: string, onload?: () => void): HTMLImageElement {
+  const img = new Image();
+  img.onload = () => {
+    bgKey = '';
+    onload?.();
+  };
+  img.src = `${import.meta.env.BASE_URL}${path}`;
+  return img;
+}
+const ready = (img: HTMLImageElement) => img.complete && img.naturalWidth > 0;
+const rugImg = loadImage('textures/rug_top.jpg', () => (rugFlipped = flipped(rugImg)));
+const floorImg = loadImage('textures/floor_paint.jpg');
+let rugFlipped: HTMLCanvasElement | null = null;
+/** Картинка, повёрнутая на 180° — половик для вида серого кота. */
+function flipped(img: HTMLImageElement): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth;
+  c.height = img.naturalHeight;
+  const g = c.getContext('2d')!;
+  g.translate(c.width, c.height);
+  g.rotate(Math.PI);
+  g.drawImage(img, 0, 0);
+  return c;
+}
 
-/** Бумага: мелкое зерно и пятна пигмента, рисуется один раз. */
+/** Стены-картины (как в 3D): что отрезать по краям — левый, правый, верх, низ. */
+const WALL_IMGS: Record<string, { img: HTMLImageElement; crop: [number, number, number, number] }> = {
+  sofa: { img: loadImage('textures/wall_sofa.jpg'), crop: [0.02, 0.98, 0.085, 0.925] },
+  door: { img: loadImage('textures/wall_door.jpg'), crop: [0.06, 0.945, 0.075, 0.915] },
+  stenka: { img: loadImage('textures/wall_stenka.jpg'), crop: [0.075, 0.925, 0.095, 0.955] },
+  window: { img: loadImage('textures/wall_window.jpg'), crop: [0.075, 0.935, 0.085, 0.96] },
+};
+
+/** Коты: на листе слева — сидит лицом к нам, справа — спиной. Вырезаем по непрозрачным пикселям. */
+interface CatSprites { front: HTMLCanvasElement; back: HTMLCanvasElement }
+const catSprites: (CatSprites | null)[] = [null, null];
+['cat_ginger', 'cat_gray'].forEach((name, i) => {
+  const img = loadImage(`sprites/${name}.png`, () => {
+    const half = (x0: number) => cropAlpha(img, x0, img.naturalWidth / 2);
+    catSprites[i] = { front: half(0), back: half(img.naturalWidth / 2) };
+  });
+});
+function cropAlpha(img: HTMLImageElement, x0: number, w: number): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = Math.round(w);
+  c.height = img.naturalHeight;
+  const g = c.getContext('2d')!;
+  g.drawImage(img, -x0, 0);
+  const data = g.getImageData(0, 0, c.width, c.height).data;
+  let minX = c.width, minY = c.height, maxX = 0, maxY = 0;
+  for (let y = 0; y < c.height; y += 2)
+    for (let x = 0; x < c.width; x += 2)
+      if (data[(y * c.width + x) * 4 + 3] > 40) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+  // Уменьшаем до разумного размера: на экране кот не больше ~500 пикселей.
+  const k = Math.min(1, 520 / (maxY - minY + 1));
+  const out = document.createElement('canvas');
+  out.width = Math.round((maxX - minX + 1) * k);
+  out.height = Math.round((maxY - minY + 1) * k);
+  out.getContext('2d')!.drawImage(c, minX, minY, maxX - minX + 1, maxY - minY + 1, 0, 0, out.width, out.height);
+  return out;
+}
+
+/** Бумага: мелкое зерно, рисуется один раз. */
 const paper = (() => {
   const c = document.createElement('canvas');
   c.width = c.height = 256;
@@ -210,121 +323,169 @@ const paper = (() => {
 })();
 let paperPattern: CanvasPattern | null = null;
 
-/** Детерминированное дрожание — линии «от руки», но не мерцают от кадра к кадру. */
 function jitter(seed: number) {
   const x = Math.sin(seed * 127.1) * 43758.5453;
   return x - Math.floor(x) - 0.5;
 }
-
 const INK = '#3b2618';
 
-// ---------- Рисование ----------
+// ---------- Неподвижный фон: стены, пол, половик ----------
+// Рисуется полосками и кэшируется: перерисовываем, только когда сдвинулась камера.
+const bgCanvas = document.createElement('canvas');
+const bg = bgCanvas.getContext('2d')!;
+let bgKey = '';
+
+function drawBackground() {
+  const key = `${cam.x.toFixed(3)}|${cam.y.toFixed(3)}|${viewRot}|${W}|${H}`;
+  if (key === bgKey) return;
+  bgKey = key;
+  bg.setTransform(DPR, 0, 0, DPR, 0, 0);
+  bg.fillStyle = '#c9b48f';
+  bg.fillRect(0, 0, W, H);
+  const names = viewRot === 0 ? { back: 'sofa', left: 'door', right: 'window' } : { back: 'stenka', left: 'window', right: 'door' };
+  drawBackWall(WALL_IMGS[names.back]);
+  drawSideWall(WALL_IMGS[names.left], -1);
+  drawSideWall(WALL_IMGS[names.right], 1);
+  drawFloorAndRug();
+}
+
+/** Дальняя стена: строки картины — горизонтальные линии на экране. */
+function drawBackWall({ img, crop: [l, r, t, b] }: { img: HTMLImageElement; crop: number[] }) {
+  if (!ready(img)) return;
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  const N = 120;
+  for (let i = 0; i < N; i++) {
+    const h0 = (i / N) * WALL_H, h1 = ((i + 1) / N) * WALL_H;
+    const p0 = projR(-ROOM_HALF, -ROOM_HALF, h0), q0 = projR(ROOM_HALF, -ROOM_HALF, h0);
+    const p1 = projR(-ROOM_HALF, -ROOM_HALF, h1);
+    // Строка картины: низ стены — низ (b), верх — t.
+    const v0 = lerp(b, t, h0 / WALL_H) * ih, v1 = lerp(b, t, h1 / WALL_H) * ih;
+    bg.drawImage(img, l * iw, v1, (r - l) * iw, v0 - v1, p0.x, p1.y, q0.x - p0.x, p0.y - p1.y + 0.7);
+  }
+}
+
+/** Боковая стена (side −1 — слева, 1 — справа): столбцы картины — вертикальные полоски. */
+function drawSideWall({ img, crop: [l, r, t, b] }: { img: HTMLImageElement; crop: number[] }, side: number) {
+  if (!ready(img)) return;
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  const x = side * ROOM_HALF;
+  const yNear = Math.min(ROOM_HALF, nearY());
+  const N = 140;
+  for (let i = 0; i < N; i++) {
+    // От дальнего угла к ближнему.
+    const y0 = lerp(-ROOM_HALF, yNear, i / N), y1 = lerp(-ROOM_HALF, yNear, (i + 1) / N);
+    const a0 = projR(x, y0, 0), a1 = projR(x, y1, 0), top0 = projR(x, y0, WALL_H);
+    if (a0.d < NEAR || a1.d < NEAR) continue;
+    // Слева стоим лицом к стене — правый край картины у дальнего угла; справа — наоборот.
+    const u0 = (y0 + ROOM_HALF) / (2 * ROOM_HALF), u1 = (y1 + ROOM_HALF) / (2 * ROOM_HALF);
+    const s0 = side < 0 ? 1 - u0 : u0, s1 = side < 0 ? 1 - u1 : u1;
+    const sx0 = lerp(l, r, Math.min(s0, s1)) * iw, sx1 = lerp(l, r, Math.max(s0, s1)) * iw;
+    const left = Math.min(a0.x, a1.x), w = Math.abs(a1.x - a0.x) + 0.7;
+    bg.drawImage(img, sx0, t * ih, Math.max(1, sx1 - sx0), (b - t) * ih, left, top0.y, w, a0.y - top0.y);
+  }
+}
+
+/** Пол и половик — строками: строка экрана — это линия пола постоянной глубины. */
+function drawFloorAndRug() {
+  const horizon = projR(cam.x, -1e4, 0).y;
+  const startY = Math.max(0, Math.floor(horizon) + 1);
+  const tile = 2.4; // картина пола ≈ 1,4 м
+  const R = CIRCLE_R;
+  const Ri = R / 0.965;
+  const rug = viewRot === 0 ? rugImg : rugFlipped;
+  for (let sy = startY; sy < H; sy++) {
+    const g0 = groundAtR(cam.cx, sy);
+    const g1 = groundAtR(cam.cx, sy + 1);
+    if (!g0 || !g1) continue;
+    if (g0.y < -ROOM_HALF) continue; // за дальней стеной
+    const scale = cam.F / g0.t; // пикселей на единицу на этой строке
+    const sxOf = (x: number) => cam.cx + (x - cam.x) * scale;
+    // Пол между боковыми стенами.
+    const xl = -ROOM_HALF, xr = ROOM_HALF;
+    if (ready(floorImg)) {
+      const iw = floorImg.naturalWidth, ih = floorImg.naturalHeight;
+      const vy = (((g0.y % tile) + tile) % tile) / tile * ih;
+      const vh = Math.max(1, (Math.abs(g0.y - g1.y) / tile) * ih);
+      for (let tx = Math.floor(xl / tile) * tile; tx < xr; tx += tile) {
+        const x0 = Math.max(xl, tx), x1 = Math.min(xr, tx + tile);
+        if (x1 <= x0) continue;
+        const dx0 = sxOf(x0), dx1 = sxOf(x1);
+        if (dx1 < 0 || dx0 > W) continue;
+        bg.drawImage(floorImg, ((x0 - tx) / tile) * iw, Math.min(vy, ih - vh), ((x1 - x0) / tile) * iw, vh, dx0, sy, dx1 - dx0 + 0.5, 1.2);
+      }
+    } else {
+      bg.fillStyle = '#6a3c29';
+      bg.fillRect(sxOf(xl), sy, (xr - xl) * scale, 1.2);
+    }
+    // Половик: строка картинки на этой глубине, только внутри круга.
+    if (Math.abs(g0.y) < R && rug) {
+      const half = Math.sqrt(R * R - g0.y * g0.y);
+      const iw = rug instanceof HTMLImageElement ? rug.naturalWidth : rug.width;
+      const ih = rug instanceof HTMLImageElement ? rug.naturalHeight : rug.height;
+      const v = ((g0.y + Ri) / (2 * Ri)) * ih;
+      const vh = Math.max(1, (Math.abs(g0.y - g1.y) / (2 * Ri)) * ih);
+      const u0 = ((-half + Ri) / (2 * Ri)) * iw, u1 = ((half + Ri) / (2 * Ri)) * iw;
+      bg.drawImage(rug, u0, v, u1 - u0, vh, sxOf(-half), sy, 2 * half * scale, 1.2);
+    }
+  }
+  // Тень под краем половика и обмётка.
+  const ring = clipRing(circlePolygon(CIRCLE_R, 120)[0].slice(0, -1).map((p) => unrot(p as Vec2)));
+  if (ring.length > 2) {
+    bg.beginPath();
+    ring.forEach(([x, y], i) => {
+      const p = projR(x, y, 0);
+      if (i) bg.lineTo(p.x, p.y);
+      else bg.moveTo(p.x, p.y);
+    });
+    bg.closePath();
+    bg.strokeStyle = INK;
+    bg.lineWidth = 2.5;
+    bg.stroke();
+  }
+}
+
+// ---------- Рисование поверх фона ----------
 function regionPath(region: Region) {
   ctx.beginPath();
   for (const poly of region)
-    for (const ring of poly)
-      ring.forEach((p, i) => {
-        const [x, y] = toScreen(p as Vec2);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+    for (const ring of poly) {
+      const pts = clipRing((ring as Vec2[]).slice(0, -1));
+      pts.forEach(([x, y], i) => {
+        const p = projR(x, y, 0.001);
+        if (i) ctx.lineTo(p.x, p.y);
+        else ctx.moveTo(p.x, p.y);
       });
+      ctx.closePath();
+    }
 }
 
-/** Нитка: тёмный контур, цвет и светлые «витки». */
+/** Нитка по полу: толщина — по глубине. */
 function drawThread(a: Vec2, b: Vec2, color: string, width: number, seed = 0) {
-  const [ax, ay] = toScreen(a), [bx, by] = toScreen(b);
-  const len = Math.hypot(bx - ax, by - ay);
-  const n = Math.max(2, Math.round(len / 18));
-  const nx = -(by - ay) / (len || 1), ny = (bx - ax) / (len || 1);
-  const pts: Vec2[] = [];
+  const lim = nearY();
+  let ra = rot(a), rb = rot(b);
+  if (ra[1] > lim && rb[1] > lim) return;
+  if (ra[1] > lim) ra = [ra[0] + (rb[0] - ra[0]) * ((lim - ra[1]) / (rb[1] - ra[1])), lim];
+  if (rb[1] > lim) rb = [rb[0] + (ra[0] - rb[0]) * ((lim - rb[1]) / (ra[1] - rb[1])), lim];
+  const n = Math.max(2, Math.round(Math.hypot(rb[0] - ra[0], rb[1] - ra[1]) / 0.06));
+  const pts: { x: number; y: number; w: number }[] = [];
   for (let i = 0; i <= n; i++) {
     const t = i / n;
-    const w = i === 0 || i === n ? 0 : jitter(seed + i) * 2.2;
-    pts.push([lerp(ax, bx, t) + nx * w, lerp(ay, by, t) + ny * w]);
+    const p = projR(lerp(ra[0], rb[0], t), lerp(ra[1], rb[1], t), 0.002);
+    const w = i === 0 || i === n ? 0 : jitter(seed + i) * 0.5;
+    pts.push({ x: p.x, y: p.y + w, w: Math.max(1.2, (width * cam.F) / Math.max(p.d, NEAR)) });
   }
-  const stroke = (style: string, wd: number, dash: number[] = []) => {
-    ctx.beginPath();
-    pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-    ctx.strokeStyle = style;
-    ctx.lineWidth = wd;
-    ctx.setLineDash(dash);
-    ctx.stroke();
-  };
   ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  stroke(INK, width + 2.5);
-  stroke(color, width);
-  stroke('rgba(255,255,255,0.35)', width * 0.35, [width * 0.9, width * 1.3]);
-  ctx.setLineDash([]);
-}
-
-function drawFloor() {
-  if (!floorPattern && floorImg.complete && floorImg.naturalWidth) floorPattern = ctx.createPattern(floorImg, 'repeat');
-  ctx.fillStyle = '#5d3a2a';
-  ctx.fillRect(0, 0, W, H);
-  if (floorPattern) {
-    // Доски ≈ 17 см: картина пола (8 досок) — около 1,4 м, т. е. 2,4 ед.
-    const k = (2.4 * S) / floorImg.naturalWidth;
-    floorPattern.setTransform(new DOMMatrix().translate(CX, CY).rotate((viewRot * 180) / Math.PI).scale(k));
-    ctx.save();
-    ctx.fillStyle = floorPattern;
-    ctx.globalAlpha = 0.85;
-    ctx.fillRect(0, 0, W, H);
-    ctx.restore();
+  for (const [style, k, dash] of [[INK, 1.6, false], [color, 1, false], ['rgba(255,255,255,0.35)', 0.35, true]] as const) {
+    ctx.strokeStyle = style;
+    for (let i = 1; i < pts.length; i++) {
+      if (dash && i % 2) continue;
+      ctx.lineWidth = pts[i].w * k + (k > 1 ? 1 : 0);
+      ctx.beginPath();
+      ctx.moveTo(pts[i - 1].x, pts[i - 1].y);
+      ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    }
   }
-}
-
-function drawRug() {
-  const [cx, cy] = toScreen([0, 0]);
-  const r = CIRCLE_R * S;
-  // Тень половика на полу.
-  ctx.save();
-  ctx.fillStyle = 'rgba(40,20,10,0.35)';
-  ctx.beginPath();
-  ctx.ellipse(cx + 4, cy + 7, r + 3, r + 3, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.clip();
-  if (rugImg.complete && rugImg.naturalWidth) {
-    // Круг на картинке чуть меньше кадра (как в 3D-версии: берём середину 96,5 %).
-    const size = (2 * r) / 0.965;
-    ctx.translate(cx, cy);
-    ctx.rotate(viewRot);
-    ctx.drawImage(rugImg, -size / 2, -size / 2, size, size);
-  } else {
-    ctx.fillStyle = '#c9a77c';
-    ctx.fill();
-  }
-  ctx.restore();
-
-  // Земли: половик перекрашен в цвет кота (оттенок меняется, рисунок косичек остаётся).
-  for (let i = 0; i < 2; i++) {
-    ctx.save();
-    regionPath(regions[i]);
-    ctx.fillStyle = COLORS[i];
-    ctx.globalAlpha = 0.55;
-    ctx.globalCompositeOperation = 'color';
-    ctx.fill('evenodd');
-    ctx.restore();
-  }
-
-  // Край половика — обмётка.
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(120,60,40,0.8)';
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([3, 4]);
-  ctx.beginPath();
-  ctx.arc(cx, cy, r - 4, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.setLineDash([]);
 }
 
 /** Красная нитка по границе: только там, где по разные стороны — земли разных котов. */
@@ -349,29 +510,34 @@ function borderSegments(): [Vec2, Vec2][] {
 }
 let borderCache: [Vec2, Vec2][] = [];
 
-/** Склеить соседние отрезки в длинные нитки — так дрожание линии выглядит естественнее. */
-function drawBorder() {
-  borderCache.forEach(([a, b], i) => drawThread(a, b, '#c8282c', 0.022 * S, i * 7.3));
+/** Тень-эллипс на полу под предметом радиуса r. */
+function groundShadow(c: Vec2, r: number, alpha = 0.3) {
+  const p = proj(c, 0);
+  if (p.d < NEAR) return;
+  const rx = (r * cam.F) / p.d;
+  const [cx, cy] = rot(c);
+  const far = projR(cx, cy - r, 0);
+  const ry = Math.max(1, Math.abs(p.y - far.y));
+  ctx.fillStyle = `rgba(40,20,10,${alpha})`;
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fill();
 }
 
+const YARN_R = MARK_R * 0.62;
 function drawYarn(m: Mark) {
-  if (m.hp <= 0) return;
-  const [x, y] = toScreen(m.c);
-  const r = MARK_R * S * 0.62;
+  const p = proj(m.c, YARN_R);
+  if (p.d < NEAR * 2) return;
+  const r = (YARN_R * cam.F) / p.d;
+  const x = p.x, y = p.y;
+  groundShadow(m.c, YARN_R * 1.1);
   const color = m.owner === 0 ? '#f0a23a' : '#4f86c6';
   ctx.save();
-  // Тень.
-  ctx.fillStyle = 'rgba(40,20,10,0.3)';
-  ctx.beginPath();
-  ctx.ellipse(x + r * 0.25, y + r * 0.35, r, r * 0.8, 0, 0, Math.PI * 2);
-  ctx.fill();
-  // Клубок.
   ctx.beginPath();
   ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fillStyle = color;
   ctx.fill();
   ctx.clip();
-  // Витки нитки.
   ctx.strokeStyle = 'rgba(60,30,10,0.35)';
   ctx.lineWidth = Math.max(1, r * 0.09);
   const seed = m.c[0] * 13 + m.c[1] * 7;
@@ -381,7 +547,6 @@ function drawYarn(m: Mark) {
     ctx.ellipse(x + Math.cos(a) * r * 0.3, y + Math.sin(a) * r * 0.3, r * 0.95, r * 0.35, a, 0, Math.PI * 2);
     ctx.stroke();
   }
-  // Свет сверху-слева, тень справа-снизу.
   const g = ctx.createRadialGradient(x - r * 0.4, y - r * 0.4, r * 0.1, x, y, r * 1.1);
   g.addColorStop(0, 'rgba(255,250,235,0.45)');
   g.addColorStop(0.6, 'rgba(255,250,235,0)');
@@ -394,11 +559,11 @@ function drawYarn(m: Mark) {
   ctx.strokeStyle = INK;
   ctx.lineWidth = 2;
   ctx.stroke();
-  // Прочность — узелки сверху.
+  // Прочность — узелки над клубком.
   for (let i = 0; i < m.hp; i++) {
-    const a = -Math.PI / 2 + (i - (m.hp - 1) / 2) * 0.55;
+    const kx = x + (i - (m.hp - 1) / 2) * r * 0.6;
     ctx.beginPath();
-    ctx.arc(x + Math.cos(a) * r * 1.3, y + Math.sin(a) * r * 1.3, Math.max(2.5, r * 0.16), 0, Math.PI * 2);
+    ctx.arc(kx, y - r * 1.35, Math.max(2.5, r * 0.17), 0, Math.PI * 2);
     ctx.fillStyle = '#f7efe0';
     ctx.fill();
     ctx.strokeStyle = INK;
@@ -407,152 +572,51 @@ function drawYarn(m: Mark) {
   }
 }
 
-/** Кот сверху, мордой по направлению face (рад, в экранных координатах). */
-function drawCat(p: number, at: Vec2, face: number) {
-  const [x, y] = toScreen(at);
-  const k = S; // всё в единицах мира
-  const coat = p === 0
-    ? { base: '#d98a3d', stripe: '#a85a22', light: '#f3d2a2' }
-    : { base: '#8f949a', stripe: '#4f545a', light: '#d9dbdc' };
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(face);
-  ctx.lineJoin = 'round';
-  ctx.lineCap = 'round';
-  // Тень.
-  ctx.fillStyle = 'rgba(40,20,10,0.3)';
-  ctx.beginPath();
-  ctx.ellipse(-0.02 * k + 4, 6, 0.2 * k, 0.13 * k, 0, 0, Math.PI * 2);
-  ctx.fill();
-  // Хвост — дугой сбоку.
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 0.055 * k + 3;
-  const tail = () => {
-    ctx.beginPath();
-    ctx.moveTo(-0.17 * k, 0.02 * k);
-    ctx.bezierCurveTo(-0.3 * k, 0.06 * k, -0.28 * k, 0.2 * k, -0.12 * k, 0.2 * k);
-    ctx.stroke();
-  };
-  tail();
-  ctx.strokeStyle = coat.base;
-  ctx.lineWidth = 0.055 * k;
-  tail();
-  // Тело.
-  ctx.beginPath();
-  ctx.ellipse(-0.05 * k, 0, 0.15 * k, 0.11 * k, 0, 0, Math.PI * 2);
-  ctx.fillStyle = coat.base;
-  ctx.fill();
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
-  // Полоски на спине.
-  ctx.save();
-  ctx.clip();
-  ctx.strokeStyle = coat.stripe;
-  ctx.lineWidth = 0.022 * k;
-  for (let i = -2; i <= 2; i++) {
-    ctx.beginPath();
-    ctx.moveTo((-0.05 + i * 0.05) * k, -0.12 * k);
-    ctx.quadraticCurveTo((-0.08 + i * 0.05) * k, 0, (-0.05 + i * 0.05) * k, 0.12 * k);
-    ctx.stroke();
-  }
-  ctx.restore();
-  // Передние лапы.
-  for (const s of [-1, 1]) {
-    ctx.beginPath();
-    ctx.ellipse(0.08 * k, s * 0.06 * k, 0.045 * k, 0.028 * k, 0, 0, Math.PI * 2);
-    ctx.fillStyle = coat.light;
-    ctx.fill();
-    ctx.strokeStyle = INK;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }
-  // Голова с ушами.
-  const hx = 0.1 * k;
-  for (const s of [-1, 1]) {
-    ctx.beginPath();
-    ctx.moveTo(hx + 0.01 * k, s * 0.035 * k);
-    ctx.lineTo(hx + 0.06 * k, s * 0.085 * k);
-    ctx.lineTo(hx - 0.035 * k, s * 0.075 * k);
-    ctx.closePath();
-    ctx.fillStyle = coat.stripe;
-    ctx.fill();
-    ctx.strokeStyle = INK;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }
-  ctx.beginPath();
-  ctx.ellipse(hx, 0, 0.07 * k, 0.075 * k, 0, 0, Math.PI * 2);
-  ctx.fillStyle = coat.base;
-  ctx.fill();
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
-  // Полоски на лбу.
-  ctx.strokeStyle = coat.stripe;
-  ctx.lineWidth = 0.014 * k;
-  for (const s of [-1, 0, 1]) {
-    ctx.beginPath();
-    ctx.moveTo(hx - 0.045 * k, s * 0.025 * k);
-    ctx.lineTo(hx + 0.01 * k, s * 0.018 * k);
-    ctx.stroke();
-  }
-  // Нос — сверху виден кончик.
-  ctx.beginPath();
-  ctx.arc(hx + 0.065 * k, 0, 0.012 * k, 0, Math.PI * 2);
-  ctx.fillStyle = '#d98c8c';
-  ctx.fill();
-  ctx.restore();
+/** Кот-спрайт: свой — спиной, соперник — лицом к нам. Низ спрайта — на полу в точке at. */
+function drawCat(p: number, at: Vec2) {
+  const sp = catSprites[p];
+  const g = proj(at, 0);
+  if (g.d < NEAR || !sp) return;
+  const img = p === viewer() ? sp.back : sp.front;
+  const h = (CAT_H * cam.F) / g.d;
+  const w = (h * img.width) / img.height;
+  groundShadow(at, 0.2, 0.35);
+  ctx.drawImage(img, g.x - w / 2, g.y - h * 0.97, w, h);
 }
 
 /**
- * Спица. center — середина в мире, h — высота над полом (ед.), theta — наклон в плоскости полёта
- * (0 — остриём вверх, π — остриём вниз), dir — направление полёта.
+ * Спица: центр, высота центра над полом, наклон theta в плоскости полёта (0 — остриём вверх,
+ * π — остриём вниз), направление полёта dir.
  */
-function drawNeedle(owner: number, center: Vec2, h: number, theta: number, dir: Vec2, alpha = 1) {
+function drawNeedle(owner: number, center: Vec2, h: number, theta: number, dir: Vec2) {
   const kind = knifeOf(owner).assist >= 0.7 ? 'bamboo' : 'metal';
-  const [gx, gy] = toScreen(center);
-  const [dx, dy] = dirToScreen(dir);
-  const half = (NEEDLE_LEN / 2) * S;
-  // Высота на экране — сдвиг вверх (вид чуть наискосок), вертикаль сжата.
-  const lift = 0.6;
-  const along = Math.sin(theta) * half;
-  const up = Math.cos(theta) * half * lift;
-  const cx = gx, cy = gy - h * S * lift;
-  const tip: Vec2 = [cx + dx * along, cy + dy * along - up];
-  const knob: Vec2 = [cx - dx * along, cy - dy * along + up];
+  const half = NEEDLE_LEN / 2;
+  const along = Math.sin(theta) * half, up = Math.cos(theta) * half;
+  const tipW: Vec2 = [center[0] + dir[0] * along, center[1] + dir[1] * along];
+  const knobW: Vec2 = [center[0] - dir[0] * along, center[1] - dir[1] * along];
+  const tip = proj(tipW, h - up), knob = proj(knobW, h + up);
+  if (tip.d < NEAR || knob.d < NEAR) return;
+  const sTip = proj(tipW, 0), sKnob = proj(knobW, 0);
+  const wpx = (0.022 * cam.F) / ((tip.d + knob.d) / 2);
   ctx.save();
-  ctx.globalAlpha = alpha;
-  // Тень на полу — проекция спицы сверху.
-  ctx.strokeStyle = 'rgba(40,20,10,0.3)';
-  ctx.lineWidth = 0.022 * S;
   ctx.lineCap = 'round';
+  // Тень на полу.
+  ctx.strokeStyle = 'rgba(40,20,10,0.28)';
+  ctx.lineWidth = wpx;
   ctx.beginPath();
-  ctx.moveTo(gx + dx * along + 3, gy + dy * along + 4);
-  ctx.lineTo(gx - dx * along + 3, gy - dy * along + 4);
+  ctx.moveTo(sKnob.x, sKnob.y);
+  ctx.lineTo(sTip.x, sTip.y);
   ctx.stroke();
-  // Сама спица.
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 0.024 * S + 2.5;
+  for (const [style, w] of [[INK, wpx + 2.5], [kind === 'bamboo' ? '#d9b77a' : '#c9ced4', wpx]] as const) {
+    ctx.strokeStyle = style;
+    ctx.lineWidth = w;
+    ctx.beginPath();
+    ctx.moveTo(knob.x, knob.y);
+    ctx.lineTo(tip.x, tip.y);
+    ctx.stroke();
+  }
   ctx.beginPath();
-  ctx.moveTo(...knob);
-  ctx.lineTo(...tip);
-  ctx.stroke();
-  ctx.strokeStyle = kind === 'bamboo' ? '#d9b77a' : '#c9ced4';
-  ctx.lineWidth = 0.024 * S;
-  ctx.beginPath();
-  ctx.moveTo(...knob);
-  ctx.lineTo(...tip);
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-  ctx.lineWidth = 0.007 * S;
-  ctx.beginPath();
-  ctx.moveTo(lerp(knob[0], tip[0], 0.1) - 1, lerp(knob[1], tip[1], 0.1) - 1);
-  ctx.lineTo(lerp(knob[0], tip[0], 0.85) - 1, lerp(knob[1], tip[1], 0.85) - 1);
-  ctx.stroke();
-  // Шарик-навершие цвета владельца.
-  ctx.beginPath();
-  ctx.arc(knob[0], knob[1], 0.03 * S, 0, Math.PI * 2);
+  ctx.arc(knob.x, knob.y, Math.max(3, (0.03 * cam.F) / knob.d), 0, Math.PI * 2);
   ctx.fillStyle = COLORS[owner];
   ctx.fill();
   ctx.strokeStyle = INK;
@@ -563,67 +627,83 @@ function drawNeedle(owner: number, center: Vec2, h: number, theta: number, dir: 
 
 function drawFieldKnife(k: FieldKnife) {
   if (k.stuck) {
-    // Торчит из половика: середина на высоте половины длины, наклон tilt.
-    const h = (NEEDLE_LEN / 2) * Math.cos(k.tilt);
-    const c: Vec2 = [k.pos[0] - k.dir[0] * Math.sin(k.tilt) * NEEDLE_LEN / 2, k.pos[1] - k.dir[1] * Math.sin(k.tilt) * NEEDLE_LEN / 2];
-    drawNeedle(k.owner, c, h, Math.PI - k.tilt, k.dir);
+    const s = Math.sin(k.tilt) * (NEEDLE_LEN / 2);
+    const c: Vec2 = [k.pos[0] - k.dir[0] * s, k.pos[1] - k.dir[1] * s];
+    drawNeedle(k.owner, c, (NEEDLE_LEN / 2) * Math.cos(k.tilt), Math.PI - k.tilt, k.dir);
   } else {
-    drawNeedle(k.owner, k.pos, 0.02, Math.PI / 2, k.dir);
+    drawNeedle(k.owner, k.pos, 0.012, Math.PI / 2, k.dir);
   }
 }
 
-function drawFlight(f: Flight) {
+function flightPose(f: Flight) {
   const u = clamp(f.t / f.T, 0, 1);
   const pos: Vec2 = [lerp(f.from[0], f.to[0], u), lerp(f.from[1], f.to[1], u)];
   const d = Math.hypot(f.to[0] - f.from[0], f.to[1] - f.from[1]);
   const peak = 0.25 + 0.14 * d;
-  const h = 4 * peak * u * (1 - u) + 0.3 * (1 - u) + (NEEDLE_LEN / 2) * u;
-  const theta = Math.PI + 2 * Math.PI * f.turns * u;
-  drawNeedle(f.owner, pos, h, theta, f.dir);
+  const h = 4 * peak * u * (1 - u) + 0.35 * (1 - u) + (NEEDLE_LEN / 2) * u;
+  return { pos, h, theta: Math.PI + 2 * Math.PI * f.turns * u };
 }
 
 function drawGhost() {
   if (phase !== 'place' || isBot(cur) || !hoverWorld) return;
   const ok = canPlaceMark(hoverWorld, regions[cur], marks);
-  const [x, y] = toScreen(hoverWorld);
   ctx.beginPath();
-  ctx.arc(x, y, MARK_R * S * 0.62, 0, Math.PI * 2);
+  for (let i = 0; i <= 40; i++) {
+    const a = (i / 40) * Math.PI * 2;
+    const p = proj([hoverWorld[0] + Math.cos(a) * YARN_R, hoverWorld[1] + Math.sin(a) * YARN_R], 0);
+    if (i) ctx.lineTo(p.x, p.y);
+    else ctx.moveTo(p.x, p.y);
+  }
   ctx.setLineDash([6, 5]);
-  ctx.strokeStyle = ok ? 'rgba(255,250,235,0.9)' : 'rgba(200,40,40,0.8)';
+  ctx.strokeStyle = ok ? 'rgba(255,250,235,0.95)' : 'rgba(200,40,40,0.85)';
   ctx.lineWidth = 2.5;
   ctx.stroke();
   ctx.setLineDash([]);
 }
 
 function render() {
+  drawBackground();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(bgCanvas, 0, 0);
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  drawFloor();
-  drawRug();
-  drawBorder();
-  cracks.forEach((k, i) => drawThread(k.a, k.b, '#f3ead8', 0.016 * S, 100 + i));
-  for (const m of marks) drawYarn(m);
+
+  // Земли: половик перекрашен в цвет кота (оттенок меняется, рисунок косичек остаётся).
+  for (let i = 0; i < 2; i++) {
+    ctx.save();
+    regionPath(regions[i]);
+    ctx.fillStyle = COLORS[i];
+    ctx.globalAlpha = 0.55;
+    ctx.globalCompositeOperation = 'color';
+    ctx.fill('evenodd');
+    ctx.restore();
+  }
+  borderCache.forEach(([a, b], i) => drawThread(a, b, '#c8282c', 0.02, i * 7.3));
+  cracks.forEach((k, i) => drawThread(k.a, k.b, '#f3ead8', 0.016, 100 + i));
   for (const f of flashes) {
     const a = (clock - f.t0) / 0.6;
     if (a > 1) continue;
-    const [x, y] = toScreen(f.c);
+    const p = proj(f.c, YARN_R);
+    if (p.d < NEAR) continue;
     ctx.beginPath();
-    ctx.arc(x, y, MARK_R * S * (0.6 + a * 0.6), 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, ((YARN_R * cam.F) / p.d) * (1 + a), 0, Math.PI * 2);
     ctx.strokeStyle = `rgba(255,240,150,${1 - a})`;
     ctx.lineWidth = 4;
     ctx.stroke();
   }
   drawGhost();
-  // Коты: смотрят друг на друга.
-  for (let i = 0; i < 2; i++) {
-    const o = shown[1 - i], me = shown[i];
-    const [ox, oy] = toScreen(o), [mx, my] = toScreen(me);
-    drawCat(i, me, Math.atan2(oy - my, ox - mx));
-  }
-  for (const k of field) drawFieldKnife(k);
-  if (landed) drawFieldKnife(landed);
-  if (flight) drawFlight(flight);
 
-  // Бумага поверх всего.
+  // Всё стоящее на полу — от дальнего к ближнему.
+  const items: { d: number; draw: () => void }[] = [];
+  for (const m of marks) if (m.hp > 0) items.push({ d: proj(m.c).d, draw: () => drawYarn(m) });
+  for (let i = 0; i < 2; i++) items.push({ d: proj(shown[i]).d, draw: () => drawCat(i, shown[i]) });
+  for (const k of [...field, ...(landed ? [landed] : [])]) items.push({ d: proj(k.pos).d - 0.01, draw: () => drawFieldKnife(k) });
+  if (flight) {
+    const f = flight;
+    const pose = flightPose(f);
+    items.push({ d: proj(pose.pos).d - 0.02, draw: () => drawNeedle(f.owner, pose.pos, pose.h, pose.theta, f.dir) });
+  }
+  items.sort((a, b) => b.d - a.d).forEach((it) => it.draw());
+
   if (!paperPattern) paperPattern = ctx.createPattern(paper, 'repeat');
   if (paperPattern) {
     ctx.save();
@@ -633,12 +713,21 @@ function render() {
     ctx.fillRect(0, 0, W, H);
     ctx.restore();
   }
-  // Виньетка.
   const v = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
   v.addColorStop(0, 'rgba(30,15,5,0)');
   v.addColorStop(1, 'rgba(30,15,5,0.45)');
   ctx.fillStyle = v;
   ctx.fillRect(0, 0, W, H);
+}
+
+/** Куда смотрит камера: за своим котом (в повёрнутых координатах). */
+function updateCamera(dt: number, snap = false) {
+  const [sx, sy] = rot(shown[viewer()]);
+  camTarget = [sx + CAM.side, sy + CAM.back];
+  const a = snap ? 1 : 1 - Math.exp(-dt * 6);
+  cam.x = lerp(cam.x, camTarget[0], a);
+  cam.y = lerp(cam.y, camTarget[1], a);
+  cam.phi = Math.atan2(CAM.height, CAM.back + CAM.lookAhead);
 }
 
 function drawTrail() {
@@ -658,6 +747,9 @@ function drawTrail() {
     trailCtx.stroke();
   }
 }
+
+addEventListener('resize', resize);
+resize();
 
 // ---------- HUD ----------
 const msgEl = $('message');
@@ -701,7 +793,7 @@ function updateHud() {
   $('hint').innerHTML = phase === 'place'
     ? 'Нажми на свою землю, чтобы положить клубок: первый — прочность 1, второй — 2, третий — 3. ' +
       'Кусок под целым клубком не отрезать: вместо этого клубок теряет прочность.'
-    : '<b>Рывок</b> в сторону цели: длина — дальность, резкость — закрутка (нужен ровно один оборот) · ' +
+    : '<b>Рывок вверх</b> (вбок — направление): длина — дальность, резкость — закрутка (нужен ровно один оборот) · ' +
       '<b>Тап по своей земле</b> — перебежать · ' +
       `<b>${k.label}</b>: помощь ${Math.round(k.assist * 100)}%, урон по клубку ${k.damage}, шатание ±${k.wobble}°`;
 }
@@ -923,7 +1015,11 @@ function aimAsBot(level: BotLevel) {
 }
 
 function updateView() {
-  viewRot = viewer() === 0 ? 0 : Math.PI;
+  const r = viewer() === 0 ? 0 : Math.PI;
+  if (r !== viewRot) {
+    viewRot = r;
+    updateCamera(0, true);
+  }
 }
 
 function reset() {
@@ -944,6 +1040,7 @@ function reset() {
   rebuildTerritories();
   shown[0] = [...stands[0]];
   shown[1] = [...stands[1]];
+  updateCamera(0, true);
   startPlacement(0);
 }
 
@@ -962,8 +1059,8 @@ function finishSwipe() {
   const last = samples[samples.length - 1];
   if (!last) return;
   if (len < TAP_MAX) {
-    const p = toWorld(last.x, last.y);
-    if (canStand(p, regions[cur])) stands[cur] = p;
+    const p = groundAt(last.x, last.y);
+    if (p && canStand(p, regions[cur])) stands[cur] = p;
     else setMessage('Рывок — бросок, тап по своей земле — перебежать');
     return;
   }
@@ -981,11 +1078,10 @@ function finishSwipe() {
     setMessage('Сделай резкий рывок в сторону цели');
     return;
   }
-  // Направление — весь рывок целиком (от начала до конца), в мире.
+  // Направление — весь рывок целиком: вверх по экрану — вперёд от себя, вбок — вбок.
   const a = samples[0];
-  const w0 = toWorld(a.x, a.y), w1 = toWorld(last.x, last.y);
-  const L = Math.hypot(w1[0] - w0[0], w1[1] - w0[1]) || 1;
-  const dir: Vec2 = [(w1[0] - w0[0]) / L, (w1[1] - w0[1]) / L];
+  const L = Math.hypot(last.x - a.x, last.y - a.y) || 1;
+  const dir = unrot([(last.x - a.x) / L, (last.y - a.y) / L]);
   const u = clamp((len - THROW.minLen) / (THROW.fullLen - THROW.minLen), 0, 1);
   const dist = lerp(THROW.dMin, THROW.dMax, u);
   const tps = Math.min(THROW.maxTps, sharp * THROW.spinK);
@@ -995,7 +1091,8 @@ function finishSwipe() {
 canvas.addEventListener('pointerdown', (ev) => {
   if (isBot(cur) || ev.button !== 0) return;
   if (phase === 'place') {
-    placeMark(toWorld(ev.clientX, ev.clientY));
+    const p = groundAt(ev.clientX, ev.clientY);
+    if (p) placeMark(p);
     updateHud();
     return;
   }
@@ -1007,7 +1104,7 @@ canvas.addEventListener('pointerdown', (ev) => {
   trail = [s];
 });
 canvas.addEventListener('pointermove', (ev) => {
-  hoverWorld = toWorld(ev.clientX, ev.clientY);
+  hoverWorld = groundAt(ev.clientX, ev.clientY);
   if (phase !== 'gesture') return;
   const s = { x: ev.clientX, y: ev.clientY, t: performance.now() / 1000 };
   gesture.push(s);
@@ -1027,6 +1124,7 @@ canvas.addEventListener('pointercancel', () => {
 // ---------- Цикл ----------
 function update(dt: number) {
   clock += dt;
+  updateCamera(dt);
   if (flight) {
     flight.t += dt;
     if (flight.t >= flight.T) land(flight);
