@@ -4,7 +4,7 @@
 // Пол, обои и нитка — текстуры материалов из того же сервиса (public/textures).
 // Правила и физика отсюда не зависят: это только то, как всё выглядит.
 import * as THREE from 'three';
-import { fitModel, rawModel, baseMaterial, tintedMaterial, setMaterial, type ModelName } from './assets';
+import { fitModel, rawModel, baseMaterial, tintedMaterial, setMaterial } from './assets';
 
 /**
  * Масштаб: игровые единицы на настоящий метр. Половик (радиус 1,5) при M = 1,8 — около 1,7 м
@@ -101,16 +101,11 @@ export function feltMaterial(color: THREE.ColorRepresentation, map?: THREE.Textu
 }
 
 /** Пол из крашеных досок: материал из сервиса (цвет + нормали); size — сторона плоскости пола. */
-export function floorMaterial(size: number): THREE.MeshStandardMaterial {
-  // Плитка текстуры — около 4 досок, ≈ 1,5 игровой единицы.
-  const rep: [number, number] = [size / 1.5, size / 1.5];
-  const base = new THREE.MeshStandardMaterial({
-    map: fileTexture('floor_color', true, rep),
-    normalMap: fileTexture('floor_normal', false, rep),
-    roughness: 0.85,
-  });
-  // Текстура ярко-красная — приглушаем к красно-коричневой половой краске: пол — фон.
-  return tintedMaterial(base, 0xa27a62, 0.72);
+export function floorMaterial(size: number): THREE.MeshLambertMaterial {
+  const rep = (3 * size) / (2 * ROOM_HALF); // 3 картины на комнату: доски ≈ 17 см
+  const map = fileTexture('floor_paint', true, [rep, rep]);
+  map.offset.set(0.5 - rep / 2, 0.5 - rep / 2);
+  return new THREE.MeshLambertMaterial({ map, color: 0x8f786c }); // пол — фон, приглушаем
 }
 
 /** Пол из крашеных досок (процедурный, прежний вариант). */
@@ -267,7 +262,7 @@ export function createRug(radius: number): THREE.Group {
     new THREE.CylinderGeometry(radius, radius * 1.01, RUG_TOP, 128, 1),
     [
       new THREE.MeshStandardMaterial({ color: 0x7d6a55, roughness: 1 }), // бок
-      new THREE.MeshStandardMaterial({ map: photo, roughness: 1 }), // верх
+      new THREE.MeshStandardMaterial({ map: photo, color: 0xe2d8ca, roughness: 1 }), // верх
       new THREE.MeshStandardMaterial({ color: 0x7d6a55, roughness: 1 }), // низ
     ],
   );
@@ -542,98 +537,56 @@ export function createPaw(coat: number): THREE.Group {
 }
 
 // ---------- Комната ----------
-/** Полуширина комнаты (≈ 4,1 м) и высота стен (≈ 2,6 м). */
+// Комната — рисованная декорация, как фон в мультфильме: четыре стены-картины в гуаши
+// (мебель нарисована на них) и рисованный пол. Объёмные только половик и всё, что на нём.
+/** Полуширина комнаты (≈ 4,1 м в поперечнике). */
 export const ROOM_HALF = 2.05 * M;
-const WALL_H = 2.6 * M;
-
-/** Плоскость-картинка на стене (окно, ковёр). */
-function wallPicture(name: string, w: number, h: number, rough = 1): THREE.Mesh {
-  const m = new THREE.Mesh(
-    new THREE.PlaneGeometry(w, h),
-    new THREE.MeshStandardMaterial({ map: fileTexture(name, true), roughness: rough }),
-  );
-  m.receiveShadow = true;
-  return m;
-}
+/** Высота стены — по пропорции картин (3:2). */
+const WALL_H = (2 * ROOM_HALF) / 1.5;
 
 /**
- * Бабушкина комната 80-х вокруг половика. Коты смотрят друг на друга вдоль Z:
- * - рыжий смотрит на −Z: там диван с пледом, над ним ковёр, рядом торшер;
- * - серый смотрит на +Z: там стенка с хрусталём и телевизор на тумбе;
- * - на стене +X окно с тюлем и геранью, под ним батарея, у окна кресло; у стены −X корзинка.
- * Перед моделей из сервиса — +X; rotY поворачивает его в нужную сторону.
+ * Стены по кругу: −Z (на неё смотрит рыжий) — диван и ковёр, −X — дверь и шкаф,
+ * +Z (смотрит серый) — стенка и телевизор, +X — окно.
  */
+const WALLS: { name: string; crop: [number, number, number, number] }[] = [
+  // crop — какую часть картины берём (доли от левого верхнего угла: левый, правый, верх, низ):
+  // художник дорисовал по краям кусочки соседних стен, потолок и пол — их отрезаем.
+  { name: 'wall_sofa', crop: [0.02, 0.98, 0.085, 0.925] },
+  { name: 'wall_door', crop: [0.06, 0.945, 0.075, 0.915] },
+  { name: 'wall_stenka', crop: [0.075, 0.925, 0.095, 0.955] },
+  { name: 'wall_window', crop: [0.075, 0.935, 0.085, 0.96] },
+];
+
+function wallTexture(name: string, [l, r, t, b]: [number, number, number, number]): THREE.Texture {
+  const tex = fileTexture(name, true).clone();
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.repeat.set(r - l, b - t);
+  tex.offset.set(l, 1 - b); // v растёт снизу вверх
+  return tex;
+}
+
 export function createRoom(): THREE.Group {
   const room = new THREE.Group();
   const W = ROOM_HALF;
-
-  // Стены — внутрь комнаты, с плинтусом.
-  const wallRep: [number, number] = [(2 * W) / 1.75, WALL_H / 1.75];
-  const wallMat = new THREE.MeshStandardMaterial({
-    map: fileTexture('wall_color', true, wallRep),
-    normalMap: fileTexture('wall_normal', false, wallRep),
-    color: 0xe6dccb,
-    roughness: 0.95,
-  });
-  const skirtMat = new THREE.MeshStandardMaterial({ color: 0x4a2c1e, roughness: 0.6 });
   for (let i = 0; i < 4; i++) {
     const side = new THREE.Group();
     side.rotation.y = (i * Math.PI) / 2;
-    const wall = new THREE.Mesh(new THREE.PlaneGeometry(2 * W, WALL_H), wallMat);
+    // Картина не освещается сценой: свет и тени уже нарисованы.
+    const wall = new THREE.Mesh(
+      new THREE.PlaneGeometry(2 * W, WALL_H),
+      new THREE.MeshBasicMaterial({ map: wallTexture(WALLS[i].name, WALLS[i].crop), color: 0xf4efe6 }),
+    );
     wall.position.set(0, WALL_H / 2, -W);
-    wall.receiveShadow = true;
-    const skirt = new THREE.Mesh(new THREE.BoxGeometry(2 * W, 0.08 * M, 0.02 * M), skirtMat);
-    skirt.position.set(0, 0.04 * M, -W + 0.01 * M);
-    skirt.receiveShadow = true;
-    side.add(wall, skirt);
+    side.add(wall);
     room.add(side);
   }
   // Потолок — чтобы сверху (обзор) не было пустоты.
   const ceiling = new THREE.Mesh(
     new THREE.PlaneGeometry(2 * W, 2 * W),
-    new THREE.MeshStandardMaterial({ color: 0xf2eee6, roughness: 1 }),
+    new THREE.MeshBasicMaterial({ color: 0xd9cdb6 }),
   );
   ceiling.rotation.x = Math.PI / 2;
   ceiling.position.y = WALL_H;
   room.add(ceiling);
-
-  /** Поставить модель: высота в метрах, позиция, куда смотрит перед (угол от +X против часовой сверху). */
-  const put = (name: ModelName, heightM: number, x: number, z: number, rotY: number) => {
-    const m = fitModel(name, { height: heightM * M, rotY });
-    if (!m) return null;
-    m.position.set(x, 0, z);
-    room.add(m);
-    return m;
-  };
-  // Повороты: перед +X → смотрит на −Z: rotY = π/2; на +Z: −π/2; на −X: π.
-  const FACE_MZ = Math.PI / 2;
-  const FACE_PZ = -Math.PI / 2;
-  const FACE_MX = Math.PI;
-
-  // Стена −Z: диван, над ним ковёр, торшер в углу.
-  put('sofa', 0.85, -0.6, -W + 0.5 * M, FACE_PZ);
-  const carpet = wallPicture('wall_carpet', 2.0 * M, 1.35 * M);
-  carpet.position.set(-0.6, 0.95 * M + 0.675 * M, -W + 0.01);
-  room.add(carpet);
-  put('lamp', 1.6, W - 0.35 * M, -W + 0.35 * M, FACE_PZ);
-
-  // Стена +Z: стенка и телевизор.
-  put('stenka', 2.0, -0.9, W - 0.3 * M, FACE_MZ);
-  put('tv', 1.15, W - 0.5 * M, W - 0.45 * M, FACE_MZ + 0.5);
-
-  // Стена +X: окно, батарея под ним, кресло у окна.
-  const win = wallPicture('window', 1.35 * M, 1.8 * M, 0.6);
-  win.rotation.y = -Math.PI / 2;
-  win.position.set(W - 0.01, 0.75 * M + 0.9 * M, 0);
-  (win.material as THREE.MeshStandardMaterial).emissive.set(0xffffff);
-  (win.material as THREE.MeshStandardMaterial).emissiveMap = fileTexture('window', true);
-  (win.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.55; // свет с улицы
-  room.add(win);
-  put('radiator', 0.6, W - 0.08 * M, 0, FACE_MX);
-  put('armchair', 0.85, W - 0.5 * M, 1.1 * M, FACE_MX - 0.6);
-
-  // Возле половика: корзинка с вязанием и тапки.
-  put('basket', 0.3, -0.85 * M, -0.75 * M, 0.4);
-  put('slippers', 0.12, 0.8 * M, -0.8 * M, 2.2);
   return room;
 }

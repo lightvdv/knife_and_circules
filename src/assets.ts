@@ -9,7 +9,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 export const MODEL_NAMES = [
   'cat_ginger', 'cat_gray', 'yarn', 'paw', 'needle',
-  'stenka', 'sofa', 'tv', 'armchair', 'lamp', 'radiator', 'basket', 'slippers',
+  // Мебель (stenka, sofa, tv, armchair, lamp, radiator, basket, slippers) больше не грузим:
+  // комната теперь нарисована на стенах (look.ts, createRoom).
 ] as const;
 export type ModelName = (typeof MODEL_NAMES)[number];
 
@@ -23,9 +24,6 @@ const cache = new Map<ModelName, THREE.Object3D>();
 const FRONT: Partial<Record<ModelName, number>> = {
   cat_ginger: Math.PI / 2,
   cat_gray: -Math.PI / 2,
-  stenka: -Math.PI / 2,
-  sofa: -Math.PI / 2,
-  armchair: -Math.PI / 2,
 };
 
 /** Загрузить все модели; onProgress — для надписи «Загрузка…». */
